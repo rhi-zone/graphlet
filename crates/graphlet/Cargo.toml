@@ -1,0 +1,15 @@
+[package]
+name = "graphlet"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Graphlet analysis for petgraph: subgraph census, graphlet-degree vectors (GDV/GDD), and network-motif detection."
+repository = "https://github.com/rhi-zone/graphlet"
+homepage = "https://docs.rhi.zone/graphlet/"
+readme = "../../README.md"
+keywords = ["graph", "graphlet", "network-motif", "petgraph", "orbit"]
+categories = ["algorithms", "science", "mathematics"]
+
+[dependencies]
+petgraph = "0.8"
+rand = "0.8"

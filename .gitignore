@@ -1,0 +1,28 @@
+# Rust
+target/
+
+# Nix
+result
+.direnv/
+
+# Node (docs)
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# Secrets
+.envrc.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Normalize
+.normalize/*
+!.normalize/config.toml
+!.normalize/duplicate-functions-allow
+!.normalize/duplicate-types-allow
+!.normalize/hotspots-allow
+!.normalize/large-files-allow
+!.normalize/memory/

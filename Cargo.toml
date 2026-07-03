@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["crates/graphlet"]
+
+[profile.dev]
+debug = 0

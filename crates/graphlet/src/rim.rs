@@ -1,0 +1,47 @@
+//! The rim: capabilities in scope for this subfield but not yet built.
+//!
+//! These modules are intentionally empty. Each names a genuine gap identified in
+//! ADR-0290 and its adversarial rim verification; they are documented here so the
+//! surface is discoverable and so no one re-derives whether they belong. Nothing in
+//! the rim is stubbed with an erroring API — a missing capability is absent, not a
+//! runtime landmine.
+
+/// Null-model / random-graph generators for significance testing.
+///
+/// TODO (ADR-0290, TRUE algorithmic voids): configuration model, double-edge-swap
+/// degree-preserving rewiring, Watts–Strogatz, LFR benchmark. These use `rand`.
+pub mod null_model {}
+
+/// Structure-aware graph kernels.
+///
+/// TODO (ADR-0290): the graphlet kernel reduces to census vectors and belongs here;
+/// Weisfeiler–Lehman and shortest-path kernels are siblings. The WL hash core is
+/// **not** to be rebuilt (NIH-corrected — observe/use `wl_isomorphism`).
+pub mod kernels {}
+
+/// Motif significance: z-scores and empirical p-values against a null model.
+///
+/// TODO (ADR-0290): compare an observed census / GDV against an ensemble from
+/// [`null_model`] to score over- and under-representation.
+pub mod significance {}
+
+/// Neighborhood statistics — a sibling module *outside* the census substrate.
+///
+/// TODO (ADR-0290, cohesion re-homing): link-prediction indices, degree
+/// assortativity, rich-club coefficient, local/average clustering with triangle
+/// counting. (Live threat: if `franken_networkx` internals ship over petgraph types,
+/// the cohesion case for re-homing these weakens.)
+pub mod neighborhood {}
+
+/// Scalable graphlet counting beyond naive per-subset canonicalization.
+///
+/// TODO (ADR-0290, OPEN gate): naive canonicalization is untenable at biological
+/// scale for k = 5. Needs ORCA orbit-count equations or a g-trie, plus
+/// ORCA-permutation alignment of the internal orbit ids.
+pub mod scalable {}
+
+/// Directed motif analysis at k ≥ 4.
+///
+/// TODO (ADR-0290, deferred by design): the census core is undirected at k ≥ 4 (k=3
+/// triads are settled). Directed graphlet classes/orbits at k ≥ 4 are future work.
+pub mod directed {}

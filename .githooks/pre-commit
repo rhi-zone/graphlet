@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running cargo fmt..."
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+cargo fmt --all
+if [ -n "$staged" ]; then
+  echo "$staged" | xargs git add
+fi
+
+echo "Running cargo clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "Running VitePress build..."
+cd docs && bun run build
+
+echo "Pre-commit checks passed!"
