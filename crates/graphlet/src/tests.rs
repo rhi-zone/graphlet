@@ -2794,3 +2794,544 @@ proptest! {
         }
     }
 }
+
+// ===========================================================================
+// PHASE-4: NEIGHBORHOOD STATISTICS
+// ===========================================================================
+
+use crate::rim::neighborhood::{
+    adamic_adar, average_clustering, census_triangle_count, common_neighbors, degree_assortativity,
+    global_clustering, jaccard, local_clustering, node_triangles, preferential_attachment,
+    resource_allocation, rich_club, rich_club_curve, score_non_edges, total_triangles,
+};
+
+// ---------------------------------------------------------------------------
+// [N1] Clustering on K_n: all coefficients == 1.0
+// ---------------------------------------------------------------------------
+#[test]
+fn clustering_complete_graph() {
+    for n in 3..=6usize {
+        let g = build_un(&complete_edges(n), n);
+        for v in 0..n {
+            let u = NodeIndex::new(v);
+            let lc = local_clustering(&g, u);
+            assert!(
+                (lc - 1.0).abs() < 1e-12,
+                "K{n}: local_clustering(node {v}) = {lc}, expected 1.0"
+            );
+        }
+        let ac = average_clustering(&g);
+        assert!(
+            (ac - 1.0).abs() < 1e-12,
+            "K{n}: average_clustering = {ac}, expected 1.0"
+        );
+        let gc = global_clustering(&g);
+        assert!(
+            (gc - 1.0).abs() < 1e-12,
+            "K{n}: global_clustering = {gc}, expected 1.0"
+        );
+        // total_triangles on K_n = C(n, 3)
+        let expected_tri = n * (n - 1) * (n - 2) / 6;
+        assert_eq!(total_triangles(&g), expected_tri, "K{n}: total_triangles");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [N2] Clustering on star: all coefficients == 0.0
+// ---------------------------------------------------------------------------
+#[test]
+fn clustering_star_zero() {
+    for n in 3..=6usize {
+        let g = build_un(&star_edges(n), n);
+        for v in 0..n {
+            let u = NodeIndex::new(v);
+            let lc = local_clustering(&g, u);
+            assert!(
+                lc.abs() < 1e-12,
+                "S{n}: local_clustering(node {v}) = {lc}, expected 0.0"
+            );
+        }
+        let ac = average_clustering(&g);
+        assert!(
+            ac.abs() < 1e-12,
+            "S{n}: average_clustering = {ac}, expected 0.0"
+        );
+        let gc = global_clustering(&g);
+        assert!(
+            gc.abs() < 1e-12,
+            "S{n}: global_clustering = {gc}, expected 0.0"
+        );
+        assert_eq!(total_triangles(&g), 0, "S{n}: total_triangles");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [N3] Clustering on cycle C_n (n >= 4): local clustering == 0.0 for all nodes
+// ---------------------------------------------------------------------------
+#[test]
+fn clustering_cycle_zero() {
+    for n in 4..=8usize {
+        let g = build_un(&cycle_edges(n), n);
+        for v in 0..n {
+            let u = NodeIndex::new(v);
+            let lc = local_clustering(&g, u);
+            assert!(
+                lc.abs() < 1e-12,
+                "C{n}: local_clustering(node {v}) = {lc}, expected 0.0"
+            );
+        }
+        assert_eq!(total_triangles(&g), 0, "C{n}: total_triangles");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [N4] Hand graph: triangle + pendant (0-1, 1-2, 2-0, 0-3)
+// ---------------------------------------------------------------------------
+#[test]
+fn clustering_hand_graph() {
+    // Nodes: 0, 1, 2, 3. Edges: (0,1), (1,2), (2,0), (0,3).
+    let g = build_un(&[(0, 1), (1, 2), (2, 0), (0, 3)], 4);
+
+    let n0 = NodeIndex::new(0);
+    let n1 = NodeIndex::new(1);
+    let n2 = NodeIndex::new(2);
+    let n3 = NodeIndex::new(3);
+
+    // Node 0: deg=3, neighbors={1,2,3}, one edge among them: (1,2) → t=1
+    // lc = 2*1 / (3*2) = 1/3
+    let lc0 = local_clustering(&g, n0);
+    assert!(
+        (lc0 - 1.0 / 3.0).abs() < 1e-12,
+        "node 0 local_clustering = {lc0}, expected 1/3"
+    );
+
+    // Node 1: deg=2, neighbors={0,2}, edge (0,2) exists → t=1, lc = 1.0
+    let lc1 = local_clustering(&g, n1);
+    assert!(
+        (lc1 - 1.0).abs() < 1e-12,
+        "node 1 local_clustering = {lc1}, expected 1.0"
+    );
+
+    // Node 2: deg=2, neighbors={0,1}, edge (0,1) exists → t=1, lc = 1.0
+    let lc2 = local_clustering(&g, n2);
+    assert!(
+        (lc2 - 1.0).abs() < 1e-12,
+        "node 2 local_clustering = {lc2}, expected 1.0"
+    );
+
+    // Node 3: deg=1 → lc = 0.0
+    let lc3 = local_clustering(&g, n3);
+    assert!(
+        lc3.abs() < 1e-12,
+        "node 3 local_clustering = {lc3}, expected 0.0"
+    );
+
+    // average_clustering = (1/3 + 1 + 1 + 0) / 4 = 7/12
+    let ac = average_clustering(&g);
+    assert!(
+        (ac - 7.0 / 12.0).abs() < 1e-12,
+        "average_clustering = {ac}, expected 7/12"
+    );
+
+    // global_clustering: tri_sum = 3 (one triangle, each vertex contributes 1)
+    // triplets = C(3,2)+C(2,2)+C(2,2)+C(1,2) = 3+1+1+0 = 5
+    // gc = 3/5
+    let gc = global_clustering(&g);
+    assert!(
+        (gc - 3.0 / 5.0).abs() < 1e-12,
+        "global_clustering = {gc}, expected 3/5"
+    );
+
+    assert_eq!(total_triangles(&g), 1, "one triangle");
+    assert_eq!(node_triangles(&g, n0), 1, "node 0: one triangle");
+    assert_eq!(node_triangles(&g, n1), 1, "node 1: one triangle");
+    assert_eq!(node_triangles(&g, n2), 1, "node 2: one triangle");
+    assert_eq!(node_triangles(&g, n3), 0, "node 3: no triangles");
+}
+
+// ---------------------------------------------------------------------------
+// [N5] Triangle census cross-check: total_triangles == census triangle count
+// ---------------------------------------------------------------------------
+#[test]
+fn total_triangles_matches_census() {
+    let cases: Vec<(Vec<(usize, usize)>, usize)> = vec![
+        (complete_edges(3), 3),
+        (complete_edges(4), 4),
+        (complete_edges(5), 5),
+        (cycle_edges(6), 6),
+        (path_edges(8), 8),
+        (star_edges(6), 6),
+        (vec![(0, 1), (1, 2), (2, 0), (0, 3)], 4), // triangle + pendant
+        (vec![(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4), // diamond
+        (random_edges(10, 0.5, 1), 10),
+        (random_edges(12, 0.4, 2), 12),
+        (random_edges(14, 0.35, 3), 14),
+        (random_edges(16, 0.3, 4), 16),
+    ];
+    for (edges, n) in &cases {
+        let g = build_un(edges, *n);
+        let from_neighborhood = total_triangles(&g);
+        let from_census = census_triangle_count(&g);
+        assert_eq!(
+            from_neighborhood, from_census,
+            "total_triangles vs census triangle count n={n}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [N6] Degree assortativity
+// ---------------------------------------------------------------------------
+#[test]
+fn assortativity_star_is_negative() {
+    // Star graph: every edge connects hub (deg = n-1) to spoke (deg = 1).
+    // Negative assortativity expected.
+    for n in 4..=8usize {
+        let g = build_un(&star_edges(n), n);
+        let r = degree_assortativity(&g);
+        assert!(
+            r.is_nan() || r < 0.0,
+            "S{n}: assortativity = {r}, expected negative"
+        );
+    }
+}
+
+#[test]
+fn assortativity_regular_is_nan() {
+    // K_n is regular: all nodes have degree n-1, zero variance → NAN.
+    for n in 3..=5usize {
+        let g = build_un(&complete_edges(n), n);
+        let r = degree_assortativity(&g);
+        assert!(
+            r.is_nan(),
+            "K{n}: assortativity should be NAN (zero variance), got {r}"
+        );
+    }
+    // Cycle is also regular.
+    for n in 4..=6usize {
+        let g = build_un(&cycle_edges(n), n);
+        let r = degree_assortativity(&g);
+        assert!(
+            r.is_nan(),
+            "C{n}: assortativity should be NAN (zero variance), got {r}"
+        );
+    }
+}
+
+#[test]
+fn assortativity_hand_graph() {
+    // Triangle + pendant: (0,1),(1,2),(2,0),(0,3)
+    // Degrees: 0→3, 1→2, 2→2, 3→1
+    // Edges and degree pairs: (0,1)→(3,2), (1,2)→(2,2), (2,0)→(2,3), (0,3)→(3,1)
+    // M=4, j·k: 6+4+6+3=19, (j+k)/2: 2.5+2+2.5+2=9→mean=9/4=2.25
+    // (j²+k²)/2: (9+4)/2+(4+4)/2+(4+9)/2+(9+1)/2 = 6.5+4+6.5+5=22→22/4=5.5
+    // r = (19/4 - 2.25²)/(5.5 - 2.25²) = (4.75 - 5.0625)/(5.5 - 5.0625)
+    //   = -0.3125 / 0.4375 = -5/7 ≈ -0.71428...
+    let g = build_un(&[(0, 1), (1, 2), (2, 0), (0, 3)], 4);
+    let r = degree_assortativity(&g);
+    let expected = -5.0 / 7.0;
+    assert!(
+        (r - expected).abs() < 1e-10,
+        "hand graph assortativity = {r}, expected {expected}"
+    );
+}
+
+#[test]
+fn assortativity_no_edges_is_nan() {
+    let g = build_un(&[], 5);
+    let r = degree_assortativity(&g);
+    assert!(r.is_nan(), "empty graph assortativity should be NAN");
+}
+
+// ---------------------------------------------------------------------------
+// [N7] Rich-club coefficient
+// ---------------------------------------------------------------------------
+#[test]
+fn rich_club_complete_graph() {
+    // K_n: every node has degree n-1. For k < n-1, all nodes are "rich",
+    // all C(n,2) edges among them → phi(k) = 1.0.
+    for n in 3..=6usize {
+        let g = build_un(&complete_edges(n), n);
+        for k in 0..(n - 1) {
+            let phi = rich_club(&g, k);
+            assert!(
+                (phi - 1.0).abs() < 1e-12,
+                "K{n} phi({k}) = {phi}, expected 1.0"
+            );
+        }
+        // For k >= n-1, no nodes qualify → phi = 0.0.
+        let phi_high = rich_club(&g, n - 1);
+        assert!(
+            phi_high.abs() < 1e-12,
+            "K{n} phi({}) = {phi_high}, expected 0.0",
+            n - 1
+        );
+    }
+}
+
+#[test]
+fn rich_club_curve_hand_graph() {
+    // Triangle + pendant: (0,1),(1,2),(2,0),(0,3)
+    // Degrees: 0→3, 1→2, 2→2, 3→1
+    let g = build_un(&[(0, 1), (1, 2), (2, 0), (0, 3)], 4);
+    let curve = rich_club_curve(&g);
+    // max_degree = 3, so curve has k = 0,1,2,3
+    assert_eq!(curve.len(), 4);
+
+    // k=0: all 4 nodes rich, 4 edges → phi = 2*4/(4*3) = 8/12 = 2/3
+    // Wait: E_{>0} = total edges = 4, N_{>0} = 4
+    // phi(0) = 2*4/(4*3) = 2/3
+    let (k0, phi0) = curve[0];
+    assert_eq!(k0, 0);
+    assert!(
+        (phi0 - 2.0 / 3.0).abs() < 1e-12,
+        "phi(0) = {phi0}, expected 2/3"
+    );
+
+    // k=1: nodes with deg>1 = {0(3), 1(2), 2(2)} → 3 rich nodes
+    // Edges among them: (0,1),(1,2),(2,0) → 3 edges
+    // phi(1) = 2*3/(3*2) = 1.0
+    let (k1, phi1) = curve[1];
+    assert_eq!(k1, 1);
+    assert!((phi1 - 1.0).abs() < 1e-12, "phi(1) = {phi1}, expected 1.0");
+
+    // k=2: nodes with deg>2 = {0(3)} → 1 rich node → phi = 0.0
+    let (k2, phi2) = curve[2];
+    assert_eq!(k2, 2);
+    assert!(phi2.abs() < 1e-12, "phi(2) = {phi2}, expected 0.0");
+
+    // k=3: no nodes with deg>3 → phi = 0.0
+    let (k3, phi3) = curve[3];
+    assert_eq!(k3, 3);
+    assert!(phi3.abs() < 1e-12, "phi(3) = {phi3}, expected 0.0");
+}
+
+// ---------------------------------------------------------------------------
+// [N8] Link prediction: hand-computed values on triangle + pendant
+// ---------------------------------------------------------------------------
+#[test]
+fn link_prediction_hand_graph() {
+    // Triangle + pendant: (0,1),(1,2),(2,0),(0,3)
+    // Degrees: 0→3, 1→2, 2→2, 3→1
+    let g = build_un(&[(0, 1), (1, 2), (2, 0), (0, 3)], 4);
+
+    let n1 = NodeIndex::new(1usize);
+    let n2 = NodeIndex::new(2usize);
+    let n3 = NodeIndex::new(3usize);
+
+    // common_neighbors(1, 3): N(1)={0,2}, N(3)={0} → common={0} → 1
+    assert_eq!(common_neighbors(&g, n1, n3), 1);
+    // common_neighbors(2, 3): N(2)={0,1}, N(3)={0} → common={0} → 1
+    assert_eq!(common_neighbors(&g, n2, n3), 1);
+    // common_neighbors(1, 2): they are adjacent, but common_neighbors ignores that
+    // N(1)={0,2}, N(2)={0,1} → common={0} → 1
+    assert_eq!(common_neighbors(&g, n1, n2), 1);
+
+    // jaccard(1, 3): inter=1, union=|{0,2,3}|=3 → 1/3  (wait: N(3)={0})
+    // N(1)={0,2}, N(3)={0} → union={0,2} → 2 items, inter=1 → 1/2
+    let j13 = jaccard(&g, n1, n3);
+    assert!(
+        (j13 - 1.0 / 2.0).abs() < 1e-12,
+        "jaccard(1,3) = {j13}, expected 0.5"
+    );
+
+    // adamic_adar(1, 3): common neighbor = 0, deg(0)=3 ≥ 2 → 1/ln(3)
+    let aa13 = adamic_adar(&g, n1, n3);
+    let expected_aa = 1.0 / (3.0f64).ln();
+    assert!(
+        (aa13 - expected_aa).abs() < 1e-12,
+        "adamic_adar(1,3) = {aa13}, expected 1/ln(3)"
+    );
+
+    // resource_allocation(1, 3): common neighbor = 0, deg(0)=3 → 1/3
+    let ra13 = resource_allocation(&g, n1, n3);
+    assert!(
+        (ra13 - 1.0 / 3.0).abs() < 1e-12,
+        "resource_allocation(1,3) = {ra13}, expected 1/3"
+    );
+
+    // preferential_attachment(1, 3): deg(1)*deg(3) = 2*1 = 2
+    assert_eq!(preferential_attachment(&g, n1, n3), 2);
+
+    // jaccard for pair with empty neighborhoods: isolated node
+    let g2 = build_un(&[], 2);
+    let a = NodeIndex::new(0);
+    let b = NodeIndex::new(1);
+    let j = jaccard(&g2, a, b);
+    assert!(
+        j.abs() < 1e-12,
+        "jaccard of isolated pair = {j}, expected 0.0"
+    );
+
+    // PA guard: adamic_adar with a degree-1 common neighbor gives 0
+    // N(3)={0}, N(1)={0,2} share common neighbor 0 with deg=3 ≥ 2 → already tested.
+    // A case where the only common neighbor has deg=1:
+    // Build graph: 0-1, 0-2, 0-3 (star S4 with hub 0)
+    // common_neighbors(1, 2) = {0}, deg(0) = 3
+    // For deg-1 guard: build 0-1, 0-2 only (hub deg 2 here, not 1)
+    // Build: 0 isolated except for being checked; 0 has deg 1 when it's the only common nbr
+    // Graph: 0-1 and 0-2 only. common(1,2)={0}, deg(0)=2 ≥ 2 → not the deg-1 case.
+    // To test deg-1 guard: use 0-1 and 1-2, common(0,2)={1}, deg(1)=2 ≥ 2.
+    // The deg-1 guard is for when a common neighbor has degree exactly 1.
+    // In a simple connected graph, a common neighbor of two distinct nodes must have
+    // degree ≥ 2 (adjacent to both u and v). So the guard only fires on degree-0
+    // (isolated) which can't be a common neighbor. The deg ≤ 1 guard for AA is
+    // theoretically conservative — we test it doesn't panic.
+    let aa_no_common = adamic_adar(&g2, a, b);
+    assert!(
+        aa_no_common.abs() < 1e-12,
+        "adamic_adar with no common neighbors = 0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [N9] score_non_edges: all non-edges scored; edge pairs skipped
+// ---------------------------------------------------------------------------
+#[test]
+fn score_non_edges_correctness() {
+    // Triangle + pendant: 4 edges out of C(4,2)=6 pairs → 2 non-edges: (1,3) and (2,3)
+    let g = build_un(&[(0, 1), (1, 2), (2, 0), (0, 3)], 4);
+    let scores = score_non_edges(&g);
+    // Should have exactly 2 non-edges
+    assert_eq!(scores.len(), 2, "expected 2 non-edges");
+
+    // Collect as (usize, usize) pairs for order-independent checking
+    let mut pairs: Vec<(usize, usize)> = scores
+        .iter()
+        .map(|(u, v, _)| (u.index().min(v.index()), u.index().max(v.index())))
+        .collect();
+    pairs.sort_unstable();
+    // Non-edges: (1,3) and (2,3)
+    assert!(
+        pairs.contains(&(1, 3)),
+        "expected non-edge (1,3), got {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&(2, 3)),
+        "expected non-edge (2,3), got {pairs:?}"
+    );
+
+    // Check that PA for each entry is consistent with its individual computation
+    for (u, v, sc) in &scores {
+        let ui = u.index();
+        let vi = v.index();
+        let pa_direct = preferential_attachment(&g, *u, *v);
+        assert_eq!(
+            sc.preferential_attachment, pa_direct,
+            "PA mismatch for ({ui},{vi})"
+        );
+        let cn_direct = common_neighbors(&g, *u, *v);
+        assert_eq!(
+            sc.common_neighbors, cn_direct,
+            "common_neighbors mismatch for ({ui},{vi})"
+        );
+    }
+
+    // Complete graph: no non-edges
+    let kg = build_un(&complete_edges(4), 4);
+    assert!(score_non_edges(&kg).is_empty(), "K4 has no non-edges");
+
+    // Empty graph: all pairs are non-edges
+    let eg = build_un(&[], 4);
+    assert_eq!(
+        score_non_edges(&eg).len(),
+        6,
+        "empty 4-node graph has C(4,2)=6 non-edges"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Proptest: neighborhood properties
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(160))]
+
+    /// local_clustering ∈ [0,1] for all nodes; average_clustering ∈ [0,1].
+    #[test]
+    fn prop_clustering_in_unit_interval((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        for v in 0..n {
+            let u = NodeIndex::new(v);
+            let lc = local_clustering(&g, u);
+            prop_assert!(
+                (0.0..=1.0).contains(&lc),
+                "local_clustering({v}) = {lc} out of [0,1]"
+            );
+        }
+        let ac = average_clustering(&g);
+        prop_assert!(
+            (0.0..=1.0).contains(&ac),
+            "average_clustering = {ac} out of [0,1]"
+        );
+        let gc = global_clustering(&g);
+        prop_assert!(
+            (0.0..=1.0).contains(&gc),
+            "global_clustering = {gc} out of [0,1]"
+        );
+    }
+
+    /// jaccard ∈ [0,1] for all node pairs.
+    #[test]
+    fn prop_jaccard_in_unit_interval((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let u = NodeIndex::new(i);
+                let v = NodeIndex::new(j);
+                let j_val = jaccard(&g, u, v);
+                prop_assert!(
+                    (0.0..=1.0).contains(&j_val),
+                    "jaccard({i},{j}) = {j_val} out of [0,1]"
+                );
+            }
+        }
+    }
+
+    /// degree_assortativity ∈ [-1, 1] or NAN.
+    #[test]
+    fn prop_assortativity_in_range((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let r = degree_assortativity(&g);
+        if !r.is_nan() {
+            prop_assert!(
+                (-1.0 - 1e-9..=1.0 + 1e-9).contains(&r),
+                "assortativity = {r} out of [-1,1]"
+            );
+        }
+    }
+
+    /// total_triangles via neighborhood == census triangle count.
+    #[test]
+    fn prop_triangle_count_vs_census((n, bits, _seed) in graph_strategy()) {
+        if n < 3 {
+            return Ok(());
+        }
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let via_neighborhood = total_triangles(&g);
+        let via_census = census_triangle_count(&g);
+        prop_assert_eq!(
+            via_neighborhood, via_census,
+            "total_triangles n={}",
+            n
+        );
+    }
+
+    /// rich_club φ(k) ∈ [0, 1] for all k.
+    #[test]
+    fn prop_rich_club_in_unit_interval((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let curve = rich_club_curve(&g);
+        for (k, phi) in &curve {
+            prop_assert!(
+                (0.0..=1.0 + 1e-12).contains(phi),
+                "phi({k}) = {phi} out of [0,1]"
+            );
+        }
+    }
+}

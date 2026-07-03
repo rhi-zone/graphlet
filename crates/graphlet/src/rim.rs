@@ -30,11 +30,13 @@ pub mod significance;
 
 /// Neighborhood statistics — a sibling module *outside* the census substrate.
 ///
-/// TODO (ADR-0290, cohesion re-homing): link-prediction indices, degree
-/// assortativity, rich-club coefficient, local/average clustering with triangle
-/// counting. (Live threat: if `franken_networkx` internals ship over petgraph types,
-/// the cohesion case for re-homing these weakens.)
-pub mod neighborhood {}
+/// Implements link-prediction indices (common neighbors, Jaccard, Adamic-Adar,
+/// resource allocation, preferential attachment), degree assortativity
+/// (Newman/Pearson), rich-club coefficient φ(k), and local/average/global
+/// clustering coefficients with triangle counting. (ADR-0290, cohesion re-homing;
+/// live threat: if `franken_networkx` internals ship over petgraph types, the
+/// cohesion case for re-homing these weakens.)
+pub mod neighborhood;
 
 /// Scalable graphlet counting beyond naive per-subset canonicalization.
 ///
