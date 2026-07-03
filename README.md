@@ -1,73 +1,21 @@
 # graphlet
 
-`graphlet` is a petgraph-native library for graphlet analysis and small-subgraph
-structural mining. It is built directly on petgraph's own graph types, so it reads the
-graph you already have rather than asking you to convert into a bespoke representation.
-It depends on only `petgraph` and `rand`, and it owns the small, well-understood
-algorithms it needs instead of pulling in a large graph-analysis stack.
+A petgraph-native Rust library for graphlet analysis of undirected simple graphs. It
+computes:
+
+- the connected induced-subgraph census (each connected induced subgraph up to 5 nodes,
+  folded by canonical isomorphism class),
+- per-node graphlet degree vectors and their distribution (GDV / GDD) across all 73
+  orbits of the graphlets up to 5 nodes,
+- named-motif detection (diamonds), reporting both induced and non-induced counts,
+- induced matching of arbitrary template graphs via petgraph's VF2.
+
+It runs directly on petgraph's own types, generic over `Graph` and `StableGraph`, so it
+reads the graph you already have. It depends only on `petgraph` and `rand`.
 
 Documentation lives at <https://docs.rhi.zone/graphlet/>.
 
-## What it does
-
-The core of the library enumerates and counts the connected induced subgraphs of a
-graph (the subgraph census) for subgraphs of up to five nodes, on undirected simple
-graphs. Each enumerated subgraph is assigned a canonical isomorphism-class label, so
-structurally identical subgraphs are folded together regardless of how their nodes
-happen to be numbered in the host graph.
-
-On top of that census it computes per-node graphlet degree vectors and their
-distribution across all 73 orbits of the graphlets up to five nodes (the GDV and GDD).
-It detects named motifs such as the diamond, reporting both induced counts (read
-directly off the census) and non-induced counts (derived from the induced census
-through a fixed conversion table rather than a separate enumerator). It also matches
-arbitrary user-supplied template graphs by induced subgraph isomorphism, delegating to
-petgraph's VF2 implementation.
-
-All of this works generically over petgraph's `Graph` and `StableGraph`, over directed
-and undirected graphs (directed input is analyzed on its underlying undirected
-structure), and over arbitrary node and edge weights.
-
-## When to use it
-
-Reach for `graphlet` when you already have a petgraph graph and you want graphlet or
-motif structural analysis of it. It lets you do that analysis without converting your
-graph into another library's types and without taking on a large dependency to get a
-handful of census-based measures.
-
-## When not to use it
-
-`graphlet` treats its input as a simple undirected graph. Self-loops are ignored and
-parallel edges are deduplicated, so if those carry meaning in your data the results
-will not reflect them. It does not do directed motifs beyond the triad level, and it has
-no directed graphlets at four nodes or more.
-
-It also does not yet do statistical significance testing, meaning z-scores of observed
-motif counts against random null models. It has no null-model generators, no graph
-kernels, and no neighborhood statistics such as link prediction, assortativity, or
-rich-club coefficients. These are planned rather than present (see ADR-0290 in the rhi
-ecosystem docs for the rationale and scope).
-
-Two further limits are worth stating plainly. The five-node census uses naive
-canonicalization and is not tuned for very large graphs, so on big inputs it will be
-slow. And while it matches arbitrary templates by induced isomorphism, it does not do
-non-induced matching of arbitrary templates.
-
-## Where to go instead
-
-If your need falls outside the above, other libraries serve it better. For core graph
-algorithms, and for VF2 subgraph isomorphism itself, use petgraph directly. For a broad
-suite of graph algorithms such as shortest paths, centrality, DAG operations, and graph
-generators, use rustworkx-core. For spectral and distance-based metrics, use graphalgs.
-For a directed triad census, use triadic-census. For graphlets on heterogeneous graphs,
-use heterogeneous_graphlets.
-
-For orbit counting at scale and for motif significance testing, the established
-references are ORCA and FANMOD. They are not Rust libraries, but if you need fast orbit
-counting on large graphs or rigorous motif significance today, they are the mature tools
-to reach for.
-
-## Usage
+## Example
 
 ```rust
 use graphlet::catalog::{find_diamonds, Induced};
@@ -92,6 +40,50 @@ assert_eq!(gdv.orbit_count(), 73);
 // Named-motif query: this graph contains exactly one induced diamond.
 assert_eq!(find_diamonds(&g, Induced::Yes).len(), 1);
 ```
+
+## What it does
+
+- Enumerates and counts connected induced subgraphs (the subgraph census), assigning
+  each a canonical isomorphism-class label so structurally identical subgraphs fold
+  together regardless of node numbering. `enumerate` yields instances lazily; `count`
+  streams the same traversal into per-class counts.
+- Computes per-node graphlet degree vectors (GDV) and the graphlet degree distribution
+  (GDD) across all 73 orbits.
+- Detects named motifs (diamonds), giving induced counts (read off the census) and
+  non-induced counts (derived from the induced census through a fixed conversion table,
+  not a separate enumerator).
+- Matches arbitrary user-supplied template graphs by induced subgraph isomorphism,
+  delegating to petgraph's VF2 `subgraph_isomorphisms_iter`.
+
+## Scope
+
+- Undirected simple graphs. Self-loops are ignored and parallel edges are deduplicated.
+  Directed input is analyzed on its underlying undirected structure.
+- Subgraph size up to 5 nodes.
+- Generic over petgraph's `Graph` and `StableGraph`, over directed and undirected graphs,
+  and over arbitrary node and edge weights.
+
+## What it does not do
+
+- No directed motifs beyond triads (no directed graphlets at k >= 4).
+- No statistical significance testing (no z-scores of observed counts).
+- No null-model generators.
+- No graph kernels.
+- No neighborhood statistics (link prediction, assortativity, rich-club coefficients).
+- The 5-node census uses naive canonicalization and is not tuned for very large graphs,
+  so it is slow on big inputs.
+- No non-induced matching of arbitrary templates (only induced template matching).
+
+## What to use instead
+
+- petgraph: core graph algorithms, and VF2 subgraph isomorphism itself.
+- rustworkx-core: a broad algorithm suite (shortest paths, centrality, DAG operations,
+  generators).
+- graphalgs: spectral and distance-based metrics.
+- triadic-census: directed triad census.
+- heterogeneous_graphlets: graphlets on heterogeneous graphs.
+- ORCA and FANMOD (not Rust): mature references for orbit counting at scale and for motif
+  significance testing.
 
 ## Install
 
