@@ -47,9 +47,14 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// Build a pattern of order `k` from an undirected edge list over vertices
-    /// `0..k`. Panics if the pattern is disconnected (the census enumerates only
-    /// connected subsets, so a disconnected pattern has no census readout).
+    /// Build a pattern of order `k` from an undirected edge list over vertices `0..k`.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `2 <= k <= 5`; on an edge that is out of range or a self-loop
+    /// (`a == b`); or if the resulting pattern is disconnected (the census enumerates
+    /// only connected subsets, so a disconnected pattern has no census readout).
+    #[must_use]
     pub fn new(k: usize, edges: &[(usize, usize)]) -> Self {
         assert!(
             (2..=5).contains(&k),
@@ -74,16 +79,21 @@ impl Pattern {
     }
 
     /// The 4-node diamond (`K4` minus one edge): two triangles sharing an edge.
+    #[must_use]
     pub fn diamond() -> Self {
         Pattern::new(4, &[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)])
     }
 
     /// The pattern's order (number of vertices).
+    #[inline]
+    #[must_use]
     pub fn order(&self) -> usize {
         self.k
     }
 
     /// The pattern's canonical graphlet class.
+    #[inline]
+    #[must_use]
     pub fn class_id(&self) -> crate::canonical::ClassId {
         crate::canonical::ClassId(self.class)
     }
@@ -120,6 +130,7 @@ fn s_pc(padj: &[Vec<usize>], cadj: &[Vec<usize>], ps: &[Vec<usize>]) -> u64 {
 /// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
 /// deduped, directed inputs unioned) — see [`GraphAdapter`]. Note the asymmetry with
 /// [`Pattern::new`], which *rejects* self-loop pattern edges rather than stripping them.
+#[must_use]
 pub fn count_pattern<G>(g: G, pattern: &Pattern, induced: Induced) -> u64
 where
     G: GraphAdapter,
@@ -159,6 +170,7 @@ pub struct Diamond<N> {
 }
 
 /// Count diamonds in `g` (see [`count_pattern`]).
+#[must_use]
 pub fn count_diamonds<G>(g: G, induced: Induced) -> u64
 where
     G: GraphAdapter,
@@ -174,6 +186,7 @@ where
 ///
 /// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
 /// deduped, directed inputs unioned) — see [`GraphAdapter`].
+#[must_use]
 pub fn find_diamonds<G>(g: G, induced: Induced) -> Vec<Diamond<G::NodeId>>
 where
     G: GraphAdapter,

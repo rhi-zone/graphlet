@@ -33,6 +33,7 @@ use petgraph::EdgeType;
 ///
 /// `node_match` / `edge_match` gate a pattern element against a host element (return
 /// `true` to allow); pass `|_, _| true` to match on structure alone.
+#[must_use]
 pub fn induced_matches<Np, Ep, Nh, Eh, Ty, NM, EM>(
     pattern: &Graph<Np, Ep, Ty>,
     host: &Graph<Nh, Eh, Ty>,
@@ -52,6 +53,7 @@ where
 
 /// All node-induced matches of `pattern` in `host` on structure alone (no node/edge
 /// predicates). See [`induced_matches`].
+#[must_use]
 pub fn induced_matches_unlabelled<Np, Ep, Nh, Eh, Ty>(
     pattern: &Graph<Np, Ep, Ty>,
     host: &Graph<Nh, Eh, Ty>,
@@ -66,6 +68,7 @@ where
 ///
 /// Counts raw VF2 embeddings, including pattern automorphisms (no node-set dedup) —
 /// see [`induced_matches`].
+#[must_use]
 pub fn count_induced_matches<Np, Ep, Nh, Eh, Ty>(
     pattern: &Graph<Np, Ep, Ty>,
     host: &Graph<Nh, Eh, Ty>,

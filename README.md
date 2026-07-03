@@ -14,6 +14,16 @@ relabelling a transitive trust chain through a facade.
 
 Documentation: <https://docs.rhi.zone/graphlet/>
 
+## Install
+
+`graphlet` is not yet published to crates.io. Depend on it by git:
+
+```toml
+[dependencies]
+graphlet = { git = "https://github.com/rhi-zone/graphlet" }
+petgraph = "0.8"
+```
+
 ## The census substrate
 
 The organizing center is a single pipeline — *enumerate connected k-subsets →

@@ -86,7 +86,7 @@ pub(crate) fn canonical_arg_by(
         let m = mask_of(k, p, &is_adj);
         if m < best {
             best = m;
-            arg = p.clone();
+            arg.clone_from(p);
         }
     }
     (best, arg)

@@ -48,6 +48,7 @@ impl Selector {
     /// Panics unless `2 <= k <= MAX_K` (currently 11). `k < 2` is degenerate (a single
     /// vertex is not a graphlet); `k > 11` overflows the `u64` canonical mask. Out-of-range
     /// `k` is a programming error, so it panics rather than returning a `Result`.
+    #[must_use]
     pub fn connected_k_subsets(k: usize) -> Self {
         assert!(
             (2..=MAX_K).contains(&k),
@@ -58,6 +59,7 @@ impl Selector {
 
     /// The subgraph order this selector enumerates.
     #[inline]
+    #[must_use]
     pub fn k(&self) -> usize {
         self.k
     }
@@ -66,9 +68,11 @@ impl Selector {
 /// A class → count map: the readout of a [`count`] fold.
 pub type Census = HashMap<ClassId, u64>;
 
-/// A stack frame of the ESU traversal.
+/// A stack frame of the ESU traversal: the extension set still to be drained at this
+/// depth and the root `v` that anchors the current tree. The subset itself is *not*
+/// stored per frame — it lives once in [`Instances::sub`], shared across the whole
+/// root-to-leaf path (see `next`).
 struct Frame {
-    sub: Vec<usize>,
     ext: Vec<usize>,
     v: usize,
 }
@@ -83,6 +87,10 @@ pub struct Instances<N> {
     ps: Vec<Vec<usize>>,
     next_root: usize,
     frames: Vec<Frame>,
+    /// The current subset, shared across the frame stack: its length equals the frame
+    /// depth, so `sub[d]` is the vertex introduced by frame `d`. Pushed/popped in lock
+    /// step with `frames`, so no per-step subset clone is needed.
+    sub: Vec<usize>,
 }
 
 impl<N: Copy> Instances<N> {
@@ -92,6 +100,7 @@ impl<N: Copy> Instances<N> {
             ps: perms(k),
             next_root: 0,
             frames: Vec::new(),
+            sub: Vec::new(),
             snapshot,
         }
     }
@@ -135,40 +144,33 @@ impl<N: Copy> Iterator for Instances<N> {
                     .copied()
                     .filter(|&u| u > v)
                     .collect();
-                self.frames.push(Frame {
-                    sub: vec![v],
-                    ext,
-                    v,
-                });
+                self.sub.clear();
+                self.sub.push(v);
+                self.frames.push(Frame { ext, v });
                 continue;
             }
             let last = self.frames.len() - 1;
-            let w = match self.frames[last].ext.pop() {
-                Some(w) => w,
-                None => {
-                    self.frames.pop();
-                    continue;
-                }
+            let Some(w) = self.frames[last].ext.pop() else {
+                // Frame drained: retreat, popping the vertex it introduced.
+                self.frames.pop();
+                self.sub.pop();
+                continue;
             };
             let v = self.frames[last].v;
-            let old = self.frames[last].sub.clone();
-            let remaining = self.frames[last].ext.clone();
-            if old.len() + 1 == self.k {
-                let mut sub = old;
-                sub.push(w);
-                let class = self.class_of(&sub);
-                let nodes = sub.iter().map(|&i| self.snapshot.id(i)).collect();
+            if self.sub.len() + 1 == self.k {
+                // Leaf: complete the subset, emit, and restore it in place.
+                self.sub.push(w);
+                let class = self.class_of(&self.sub);
+                let nodes = self.sub.iter().map(|&i| self.snapshot.id(i)).collect();
+                self.sub.pop();
                 return Some(Instance { nodes, class });
             }
-            // Exclusive neighborhood is computed against the OLD subset (before w).
-            let child_ext = self.extend(&old, w, v, remaining);
-            let mut sub = old;
-            sub.push(w);
-            self.frames.push(Frame {
-                sub,
-                ext: child_ext,
-                v,
-            });
+            // Exclusive neighborhood is computed against the subset BEFORE w is added;
+            // the child's extension seeds from this frame's remaining `ext`.
+            let remaining = self.frames[last].ext.clone();
+            let child_ext = self.extend(&self.sub, w, v, remaining);
+            self.sub.push(w);
+            self.frames.push(Frame { ext: child_ext, v });
         }
     }
 }
@@ -182,6 +184,7 @@ impl<N: Copy> Iterator for Instances<N> {
 /// `g` is treated as a *simple undirected* graph: self-loops are stripped, parallel
 /// edges deduped, and directed inputs unioned. See [`GraphAdapter`] for the full
 /// precondition.
+#[must_use]
 pub fn enumerate<G>(g: G, sel: &Selector) -> Instances<G::NodeId>
 where
     G: GraphAdapter,
@@ -252,6 +255,7 @@ pub(crate) fn for_each_subset<N: Copy>(
 ///
 /// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
 /// deduped, directed inputs unioned) — see [`GraphAdapter`].
+#[must_use]
 pub fn count<G>(g: G, sel: &Selector) -> Census
 where
     G: GraphAdapter,

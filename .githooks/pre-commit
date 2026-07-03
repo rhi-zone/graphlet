@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -e
 
+# The checks below (cargo fmt/clippy, bun/VitePress) live in the Nix devshell. When a
+# commit is invoked outside `nix develop`, `cargo` is not on PATH — rather than fail or
+# skip a check, re-exec this hook inside the devshell so every check still runs. The
+# guard var prevents an infinite loop if the devshell itself somehow lacks the tools.
+if ! command -v cargo >/dev/null 2>&1; then
+  if [ -n "$GRAPHLET_HOOK_REEXEC" ]; then
+    echo "pre-commit: cargo still missing after entering the devshell; aborting." >&2
+    exit 1
+  fi
+  if command -v nix >/dev/null 2>&1; then
+    root="$(git rev-parse --show-toplevel)"
+    echo "pre-commit: cargo not on PATH; re-executing inside the Nix devshell..."
+    exec env GRAPHLET_HOOK_REEXEC=1 nix develop "$root" --command "$0" "$@"
+  fi
+  echo "pre-commit: neither cargo nor nix is on PATH; cannot run checks. Enter the" >&2
+  echo "            devshell (\`nix develop\`) and commit again." >&2
+  exit 1
+fi
+
 echo "Running cargo fmt..."
 staged=$(git diff --cached --name-only --diff-filter=ACMR)
 cargo fmt --all

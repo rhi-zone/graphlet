@@ -59,6 +59,7 @@ impl<N: Copy> Snapshot<N> {
     ///
     /// Raw host slot indices are compacted to a dense `0..n` space, so `StableGraph`
     /// inputs with removed nodes (holes in the slot numbering) are handled correctly.
+    #[must_use]
     pub fn new<G>(g: G) -> Self
     where
         G: GraphAdapter<NodeId = N>,
@@ -76,12 +77,19 @@ impl<N: Copy> Snapshot<N> {
         }
         let n = ids.len();
         let mut adj = vec![Vec::new(); n];
+        // Dedup per row in O(deg) via a stamp array: `seen[ui] == vi` means `ui` was
+        // already recorded for the current row `vi`. This avoids the O(deg) linear
+        // `contains` scan per neighbor (which was O(V·deg²), i.e. O(V³) on dense
+        // graphs). `usize::MAX` is never a valid compacted index, so it is a safe
+        // "unstamped" sentinel.
+        let mut seen = vec![usize::MAX; n];
         for v in g.node_identifiers() {
             let vi = compact[g.to_index(v)];
             for dir in [Direction::Outgoing, Direction::Incoming] {
                 for u in g.neighbors_directed(v, dir) {
                     let ui = compact[g.to_index(u)];
-                    if ui != vi && !adj[vi].contains(&ui) {
+                    if ui != vi && seen[ui] != vi {
+                        seen[ui] = vi;
                         adj[vi].push(ui);
                     }
                 }
@@ -96,30 +104,35 @@ impl<N: Copy> Snapshot<N> {
 
     /// Number of nodes.
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.ids.len()
     }
 
     /// Whether the graph is empty.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
 
     /// Host `NodeId` for an index.
     #[inline]
+    #[must_use]
     pub fn id(&self, i: usize) -> N {
         self.ids[i]
     }
 
     /// Undirected neighbor indices of `i`.
     #[inline]
+    #[must_use]
     pub fn neighbors(&self, i: usize) -> &[usize] {
         &self.adj[i]
     }
 
     /// Whether indices `a` and `b` are adjacent.
     #[inline]
+    #[must_use]
     pub fn adjacent(&self, a: usize, b: usize) -> bool {
         self.nbr[a].contains(&b)
     }

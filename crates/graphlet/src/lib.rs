@@ -46,6 +46,37 @@
 //! matching of an arbitrary template is deliberately deferred (see [`template`] and
 //! ADR-0290) — it has no grounding beneficiary today and cannot reuse the k-bounded
 //! `s(P,C)` trick.
+//!
+//! # Example
+//!
+//! Build a petgraph graph, then read the three primary outputs — a class [`count`],
+//! per-node [`graphlet_degree_vectors`], and a named-motif
+//! [`find_diamonds`](catalog::find_diamonds) query — off the one census substrate:
+//!
+//! ```
+//! use graphlet::catalog::{find_diamonds, Induced};
+//! use graphlet::{count, graphlet_degree_vectors, Registry, Selector};
+//! use petgraph::graph::UnGraph;
+//!
+//! // A diamond (K4 minus one edge: two triangles sharing the 0–2 spine) plus a
+//! // pendant vertex 4 hanging off 3.
+//! let g: UnGraph<(), ()> =
+//!     UnGraph::from_edges([(0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (3, 4)]);
+//!
+//! // Class census of connected 3-node induced subgraphs (triangles + paths).
+//! let census = count(&g, &Selector::connected_k_subsets(3));
+//! assert_eq!(census.values().sum::<u64>(), 6);
+//!
+//! // Per-node graphlet-degree vectors (73 orbits, k <= 5); the registry is reusable.
+//! let reg = Registry::build();
+//! let gdv = graphlet_degree_vectors(&g, &reg);
+//! assert_eq!(gdv.orbit_count(), 73);
+//!
+//! // Named-motif query: exactly one induced diamond.
+//! assert_eq!(find_diamonds(&g, Induced::Yes).len(), 1);
+//! ```
+
+#![warn(missing_docs)]
 
 mod canonical;
 mod census;

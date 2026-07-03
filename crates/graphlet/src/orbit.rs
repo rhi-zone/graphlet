@@ -33,6 +33,7 @@ pub struct Registry {
 
 impl Registry {
     /// Build the orbit registry for orders `2..=5` (73 orbits).
+    #[must_use]
     pub fn build() -> Self {
         let mut slot_global = HashMap::new();
         let mut orbit_info: Vec<(usize, u64, usize)> = Vec::new();
@@ -47,7 +48,7 @@ impl Registry {
                 }
                 let base = next_id;
                 let slotmap: Vec<usize> = part.iter().map(|&lo| base + lo).collect();
-                for &sz in sizes.iter() {
+                for &sz in &sizes {
                     orbit_info.push((k, class, sz));
                 }
                 next_id += n_local;
@@ -62,12 +63,14 @@ impl Registry {
 
     /// Total number of orbits (73 for `2..=5`).
     #[inline]
+    #[must_use]
     pub fn orbit_count(&self) -> usize {
         self.orbit_info.len()
     }
 
     /// `(order, class-mask, orbit size)` for a global orbit id.
     #[inline]
+    #[must_use]
     pub fn orbit_meta(&self, id: usize) -> (usize, u64, usize) {
         self.orbit_info[id]
     }
@@ -133,30 +136,35 @@ pub struct GdvTable<N> {
 impl<N: Copy> GdvTable<N> {
     /// Number of nodes (rows).
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.ids.len()
     }
 
     /// Whether the table is empty.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
 
     /// Number of orbits (columns); 73 for the `2..=5` registry.
     #[inline]
+    #[must_use]
     pub fn orbit_count(&self) -> usize {
         self.orbit_count
     }
 
     /// Host `NodeId` for row `i`.
     #[inline]
+    #[must_use]
     pub fn id(&self, i: usize) -> N {
         self.ids[i]
     }
 
     /// The graphlet-degree vector of row `i`.
     #[inline]
+    #[must_use]
     pub fn row(&self, i: usize) -> &[u64] {
         &self.rows[i]
     }
@@ -170,6 +178,7 @@ impl<N: Copy> GdvTable<N> {
     }
 
     /// The graphlet-degree distribution for one orbit: `degree → number of nodes`.
+    #[must_use]
     pub fn degree_distribution(&self, orbit: usize) -> BTreeMap<u64, u64> {
         let mut dist = BTreeMap::new();
         for row in &self.rows {
@@ -187,6 +196,7 @@ impl<N: Copy> GdvTable<N> {
 ///
 /// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
 /// deduped, directed inputs unioned) — see [`GraphAdapter`].
+#[must_use]
 pub fn graphlet_degree_vectors<G>(g: G, reg: &Registry) -> GdvTable<G::NodeId>
 where
     G: GraphAdapter,
