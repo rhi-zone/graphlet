@@ -8,9 +8,10 @@
 
 /// Null-model / random-graph generators for significance testing.
 ///
-/// TODO (ADR-0290, TRUE algorithmic voids): configuration model, double-edge-swap
-/// degree-preserving rewiring, Watts–Strogatz, LFR benchmark. These use `rand`.
-pub mod null_model {}
+/// Implemented (ADR-0290, TRUE algorithmic voids): configuration model (raw and
+/// simple), double-edge-swap degree-preserving rewiring, Watts–Strogatz, LFR
+/// benchmark. All generators accept `&mut impl Rng` for seeded reproducibility.
+pub mod null_model;
 
 /// Structure-aware graph kernels.
 ///

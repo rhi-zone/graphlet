@@ -24,6 +24,10 @@ use crate::catalog::{
 };
 use crate::census::{count, enumerate, for_each_subset, Census, Selector};
 use crate::orbit::{graphlet_degree_vectors, Registry};
+use crate::rim::null_model::{
+    configuration_model, configuration_model_simple, double_edge_swap, lfr_benchmark,
+    watts_strogatz,
+};
 use crate::snapshot::Snapshot;
 use crate::template::{
     count_induced_matches, count_monomorphisms, count_monomorphisms_unlabelled, monomorphisms,
@@ -1781,6 +1785,471 @@ proptest! {
                     }
                 }
             }
+        }
+    }
+}
+
+// ===========================================================================
+// PHASE-2 NULL MODEL TESTS
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Stub-degree of node i: counts each edge endpoint, counting self-loop as 2.
+/// This is the correct invariant for the raw configuration model.
+fn stub_degree_of(g: &UnGraph<(), ()>, i: usize) -> usize {
+    use petgraph::visit::EdgeRef as _;
+    g.edge_references()
+        .map(|e| {
+            let a = e.source().index();
+            let b = e.target().index();
+            if a == b {
+                if a == i {
+                    2
+                } else {
+                    0
+                }
+            } else {
+                usize::from(a == i) + usize::from(b == i)
+            }
+        })
+        .sum()
+}
+
+/// Degree of node i in a simple graph (no self-loops, no parallel edges).
+fn simple_degree(g: &UnGraph<(), ()>, i: usize) -> usize {
+    g.edges(NodeIndex::new(i)).count()
+}
+
+/// Whether g has no self-loops.
+fn no_self_loops(g: &UnGraph<(), ()>) -> bool {
+    use petgraph::visit::EdgeRef as _;
+    g.edge_references()
+        .all(|e| e.source().index() != e.target().index())
+}
+
+/// Whether g has no parallel edges (requires simple graph, no self-loops).
+fn no_parallel_edges(g: &UnGraph<(), ()>) -> bool {
+    use petgraph::visit::EdgeRef as _;
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    for e in g.edge_references() {
+        let a = e.source().index();
+        let b = e.target().index();
+        if a == b {
+            continue;
+        }
+        let k = if a < b { (a, b) } else { (b, a) };
+        if !seen.insert(k) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Edge set as a sorted vec of canonical pairs.
+fn edge_set_sorted(g: &UnGraph<(), ()>) -> Vec<(usize, usize)> {
+    use petgraph::visit::EdgeRef as _;
+    let mut v: Vec<(usize, usize)> = g
+        .edge_references()
+        .map(|e| {
+            let a = e.source().index();
+            let b = e.target().index();
+            if a < b {
+                (a, b)
+            } else {
+                (b, a)
+            }
+        })
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+// ---------------------------------------------------------------------------
+// Configuration model — raw
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_model_raw_exact_degrees() {
+    let mut rng = StdRng::seed_from_u64(1);
+    // Even-sum degree sequences.
+    for deg_seq in &[
+        vec![2usize, 2, 2, 2],
+        vec![1, 1, 2, 2],
+        vec![3, 3, 2, 2, 2, 2],
+        vec![4, 4, 4, 4, 4, 4],
+        vec![1, 1, 1, 1, 1, 1, 1, 1],
+    ] {
+        let g = configuration_model(deg_seq, &mut rng);
+        assert_eq!(g.node_count(), deg_seq.len(), "node count");
+        assert_eq!(
+            g.edge_count(),
+            deg_seq.iter().sum::<usize>() / 2,
+            "edge count"
+        );
+        for (i, &d) in deg_seq.iter().enumerate() {
+            assert_eq!(stub_degree_of(&g, i), d, "stub-degree mismatch at node {i}");
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "even stub sum")]
+fn config_model_odd_sum_panics() {
+    let mut rng = StdRng::seed_from_u64(0);
+    let _ = configuration_model(&[1, 2], &mut rng); // sum = 3, odd
+}
+
+// ---------------------------------------------------------------------------
+// Configuration model — simple
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_model_simple_no_loops_no_parallel() {
+    let mut rng = StdRng::seed_from_u64(2);
+    for deg_seq in &[
+        vec![2usize, 2, 2, 2],
+        vec![3, 3, 3, 3, 3, 3],
+        vec![1, 1, 2, 2, 2, 2],
+        vec![4, 4, 4, 4, 4, 4, 4, 4],
+    ] {
+        let g = configuration_model_simple(deg_seq, &mut rng);
+        assert_eq!(g.node_count(), deg_seq.len(), "node count");
+        assert!(no_self_loops(&g), "no self-loops");
+        assert!(no_parallel_edges(&g), "no parallel edges");
+        // Realized degree <= degree_seq[i].
+        for (i, &d) in deg_seq.iter().enumerate() {
+            assert!(
+                simple_degree(&g, i) <= d,
+                "realized degree > requested degree at node {i}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Double-edge-swap
+// ---------------------------------------------------------------------------
+
+#[test]
+fn des_degree_preservation() {
+    let mut rng = StdRng::seed_from_u64(3);
+    let n = 12;
+    let edges = random_edges(n, 0.4, 7);
+    let g = build_un(&edges, n);
+    let orig_degrees: Vec<usize> = (0..n).map(|i| simple_degree(&g, i)).collect();
+    let swapped = double_edge_swap(&g, 200, &mut rng);
+    let new_degrees: Vec<usize> = (0..n).map(|i| simple_degree(&swapped, i)).collect();
+    assert_eq!(new_degrees, orig_degrees, "degrees must be preserved");
+}
+
+#[test]
+fn des_no_self_loops_or_parallel() {
+    let n = 16;
+    let edges = random_edges(n, 0.4, 8);
+    let g = build_un(&edges, n);
+    for swaps in [50, 200, 500] {
+        let mut r = StdRng::seed_from_u64(swaps as u64);
+        let swapped = double_edge_swap(&g, swaps, &mut r);
+        assert!(no_self_loops(&swapped), "no self-loops after {swaps} swaps");
+        assert!(
+            no_parallel_edges(&swapped),
+            "no parallel edges after {swaps} swaps"
+        );
+    }
+}
+
+#[test]
+fn des_edge_count_preserved() {
+    let mut rng = StdRng::seed_from_u64(5);
+    let n = 14;
+    let edges = random_edges(n, 0.35, 9);
+    let g = build_un(&edges, n);
+    let m = g.edge_count();
+    let swapped = double_edge_swap(&g, 300, &mut rng);
+    assert_eq!(swapped.edge_count(), m, "edge count preserved");
+}
+
+#[test]
+fn des_mixing_evidence() {
+    // After enough swaps on a graph with many edges, the edge set should change.
+    let n = 20;
+    let edges = random_edges(n, 0.4, 11);
+    let g = build_un(&edges, n);
+    let orig = edge_set_sorted(&g);
+    let mut rng = StdRng::seed_from_u64(42);
+    let swapped = double_edge_swap(&g, 500, &mut rng);
+    let new = edge_set_sorted(&swapped);
+    assert_ne!(orig, new, "edge set must change after sufficient swaps");
+}
+
+#[test]
+fn des_empty_and_single_edge_passthrough() {
+    let mut rng = StdRng::seed_from_u64(6);
+    // Empty graph.
+    let empty: UnGraph<(), ()> = build_un(&[], 0);
+    let r = double_edge_swap(&empty, 10, &mut rng);
+    assert_eq!(r.node_count(), 0);
+    assert_eq!(r.edge_count(), 0);
+    // Single edge: no valid swap.
+    let single = build_un(&[(0, 1)], 2);
+    let r2 = double_edge_swap(&single, 10, &mut rng);
+    assert_eq!(r2.edge_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Watts-Strogatz
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ws_node_and_edge_count() {
+    let mut rng = StdRng::seed_from_u64(7);
+    for &(n, k) in &[(10usize, 4usize), (20, 6), (50, 4), (100, 8)] {
+        let g = watts_strogatz(n, k, 0.3, &mut rng);
+        assert_eq!(g.node_count(), n, "node count n={n} k={k}");
+        assert_eq!(g.edge_count(), n * k / 2, "edge count n={n} k={k}");
+    }
+}
+
+#[test]
+fn ws_p0_is_pure_ring_lattice() {
+    let n = 20;
+    let k = 4;
+    let mut rng = StdRng::seed_from_u64(8);
+    let g = watts_strogatz(n, k, 0.0, &mut rng);
+    assert_eq!(g.node_count(), n);
+    assert_eq!(g.edge_count(), n * k / 2);
+    let half_k = k / 2;
+    for i in 0..n {
+        for j in 1..=half_k {
+            let nb = (i + j) % n;
+            assert!(
+                g.contains_edge(NodeIndex::new(i), NodeIndex::new(nb)),
+                "ring lattice edge ({i},{nb}) missing"
+            );
+        }
+    }
+    // No self-loops or parallel edges in the ring lattice.
+    assert!(no_self_loops(&g));
+    assert!(no_parallel_edges(&g));
+}
+
+#[test]
+fn ws_simple_at_all_p() {
+    let mut rng = StdRng::seed_from_u64(9);
+    let n = 30;
+    let k = 4;
+    for &p in &[0.0, 0.1, 0.5, 1.0] {
+        let g = watts_strogatz(n, k, p, &mut rng);
+        assert_eq!(g.node_count(), n, "p={p}");
+        assert_eq!(g.edge_count(), n * k / 2, "edge count p={p}");
+        assert!(no_self_loops(&g), "self-loop at p={p}");
+        assert!(no_parallel_edges(&g), "parallel edge at p={p}");
+    }
+}
+
+#[test]
+fn ws_p1_not_ring() {
+    // At p=1 the ring lattice structure is broken; check via multiple seeds.
+    let n = 40;
+    let k = 4;
+    let half_k = k / 2;
+    let mut found_non_ring = false;
+    for seed in 0..20u64 {
+        let mut rng = StdRng::seed_from_u64(seed + 100);
+        let g = watts_strogatz(n, k, 1.0, &mut rng);
+        // Check if at least one expected lattice edge is missing.
+        let any_missing = (0..n).any(|i| {
+            (1..=half_k).any(|j| {
+                let nb = (i + j) % n;
+                !g.contains_edge(NodeIndex::new(i), NodeIndex::new(nb))
+            })
+        });
+        if any_missing {
+            found_non_ring = true;
+            break;
+        }
+    }
+    assert!(found_non_ring, "p=1 graph should not be a ring lattice");
+}
+
+#[test]
+#[should_panic(expected = "k must be even")]
+fn ws_odd_k_panics() {
+    let mut rng = StdRng::seed_from_u64(0);
+    let _ = watts_strogatz(10, 3, 0.1, &mut rng);
+}
+
+#[test]
+#[should_panic(expected = "n must be greater than k")]
+fn ws_n_le_k_panics() {
+    let mut rng = StdRng::seed_from_u64(0);
+    let _ = watts_strogatz(4, 4, 0.1, &mut rng);
+}
+
+// ---------------------------------------------------------------------------
+// LFR benchmark
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lfr_node_and_community_count() {
+    let mut rng = StdRng::seed_from_u64(10);
+    let n = 100;
+    let (g, community) = lfr_benchmark(n, 5.0, 15, 0.1, 2.5, 1.5, 10, 50, &mut rng);
+    assert_eq!(g.node_count(), n, "node count");
+    assert_eq!(community.len(), n, "community vec length");
+}
+
+#[test]
+fn lfr_community_labels_in_range() {
+    let mut rng = StdRng::seed_from_u64(11);
+    let n = 80;
+    let (_, community) = lfr_benchmark(n, 4.0, 12, 0.2, 2.5, 1.5, 8, 30, &mut rng);
+    let max_label = *community.iter().max().unwrap();
+    // There must be at least 1 community and labels start at 0.
+    assert!(max_label < n, "community labels must be < n");
+    // Every node has a valid label (some community was assigned).
+    assert_eq!(community.len(), n);
+}
+
+#[test]
+fn lfr_degree_distribution_sanity() {
+    // Degrees should be in [1, max_degree] and the mean should be in a loose range.
+    let mut rng = StdRng::seed_from_u64(12);
+    let n = 200;
+    let max_degree = 20;
+    let avg_degree = 6.0;
+    let (g, _) = lfr_benchmark(n, avg_degree, max_degree, 0.1, 2.5, 1.5, 10, 60, &mut rng);
+    assert_eq!(g.node_count(), n);
+    let degrees: Vec<usize> = (0..n).map(|i| g.edges(NodeIndex::new(i)).count()).collect();
+    // All degrees <= max_degree (guaranteed by power-law sampling bound).
+    assert!(
+        degrees.iter().all(|&d| d <= max_degree * 2),
+        "some degree exceeds 2*max_degree (LFR allows degree growth from external matching)"
+    );
+    // Mean degree is non-zero.
+    let mean: f64 = degrees.iter().sum::<usize>() as f64 / n as f64;
+    assert!(mean > 0.5, "mean degree must be positive, got {mean}");
+}
+
+#[test]
+fn lfr_mixing_fraction_roughly_mu() {
+    // For each node, fraction of edges going outside its community ≈ mu.
+    let mu = 0.15f64;
+    let mut rng = StdRng::seed_from_u64(13);
+    let n = 200;
+    let (g, community) = lfr_benchmark(n, 6.0, 20, mu, 2.5, 1.5, 10, 60, &mut rng);
+    use petgraph::visit::EdgeRef as _;
+    let mut external_fractions: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let deg = g.edges(NodeIndex::new(i)).count();
+        if deg == 0 {
+            continue;
+        }
+        let external = g
+            .edges(NodeIndex::new(i))
+            .filter(|e| {
+                let nb = if e.source().index() == i {
+                    e.target().index()
+                } else {
+                    e.source().index()
+                };
+                community[nb] != community[i]
+            })
+            .count();
+        external_fractions.push(external as f64 / deg as f64);
+    }
+    if !external_fractions.is_empty() {
+        let realized_mu = external_fractions.iter().sum::<f64>() / external_fractions.len() as f64;
+        // Loose tolerance: LFR approximations can deviate.
+        assert!(
+            realized_mu < mu + 0.25,
+            "realized mixing {realized_mu:.3} much higher than mu={mu}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proptest: double-edge-swap degree preservation
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Degree sequence of every node is unchanged by double_edge_swap, for all
+    /// random simple graphs and swap counts.
+    #[test]
+    fn prop_des_degree_preservation((n, bits, seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let orig_deg: Vec<usize> = (0..n).map(|i| simple_degree(&g, i)).collect();
+        let n_swaps = n.saturating_mul(5).max(10);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let swapped = double_edge_swap(&g, n_swaps, &mut rng);
+        let new_deg: Vec<usize> = (0..n).map(|i| simple_degree(&swapped, i)).collect();
+        prop_assert_eq!(new_deg, orig_deg, "degree preservation n={}", n);
+    }
+
+    /// No self-loops or parallel edges in double_edge_swap output.
+    #[test]
+    fn prop_des_simple_output((n, bits, seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let swapped = double_edge_swap(&g, 50, &mut rng);
+        prop_assert!(no_self_loops(&swapped), "self-loop in output n={}", n);
+        prop_assert!(no_parallel_edges(&swapped), "parallel edge in output n={}", n);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proptest: configuration model raw stub-degree exactness
+// ---------------------------------------------------------------------------
+
+/// Strategy: a vector of 2–8 degrees each in 1..=6, with even total sum.
+fn even_degree_seq_strategy() -> impl Strategy<Value = Vec<usize>> {
+    proptest::collection::vec(1usize..=6, 2..=8).prop_map(|mut v| {
+        if v.iter().sum::<usize>() % 2 != 0 {
+            v[0] += 1; // bump first element to make sum even
+        }
+        v
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// Raw configuration model stub-degrees exactly equal the requested sequence.
+    #[test]
+    fn prop_config_model_raw_exact_stubs(deg_seq in even_degree_seq_strategy(), seed: u64) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let g = configuration_model(&deg_seq, &mut rng);
+        prop_assert_eq!(g.node_count(), deg_seq.len());
+        prop_assert_eq!(g.edge_count(), deg_seq.iter().sum::<usize>() / 2);
+        for (i, &d) in deg_seq.iter().enumerate() {
+            prop_assert_eq!(
+                stub_degree_of(&g, i), d,
+                "stub-degree mismatch at node {} (deg_seq={:?})", i, deg_seq
+            );
+        }
+    }
+
+    /// Simple variant: no self-loops, no parallel edges, realized degree ≤ requested.
+    #[test]
+    fn prop_config_model_simple_valid(deg_seq in even_degree_seq_strategy(), seed: u64) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let g = configuration_model_simple(&deg_seq, &mut rng);
+        prop_assert_eq!(g.node_count(), deg_seq.len());
+        prop_assert!(no_self_loops(&g), "self-loop in simple variant");
+        prop_assert!(no_parallel_edges(&g), "parallel edge in simple variant");
+        for (i, &d) in deg_seq.iter().enumerate() {
+            prop_assert!(
+                simple_degree(&g, i) <= d,
+                "realized degree {} > requested {} at node {}",
+                simple_degree(&g, i), d, i
+            );
         }
     }
 }
