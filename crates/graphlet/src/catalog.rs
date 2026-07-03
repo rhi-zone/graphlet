@@ -116,6 +116,10 @@ fn s_pc(padj: &[Vec<usize>], cadj: &[Vec<usize>], ps: &[Vec<usize>]) -> u64 {
 ///
 /// Induced: the census count of the pattern's class. Non-induced: the verified
 /// `Σ_C indCount(C)·s(P,C)` labelled sum divided by `|Aut(P)|`.
+///
+/// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
+/// deduped, directed inputs unioned) — see [`GraphAdapter`]. Note the asymmetry with
+/// [`Pattern::new`], which *rejects* self-loop pattern edges rather than stripping them.
 pub fn count_pattern<G>(g: G, pattern: &Pattern, induced: Induced) -> u64
 where
     G: GraphAdapter,
@@ -167,6 +171,9 @@ where
 /// Induced diamonds come from 4-subsets whose induced class is the diamond. For
 /// non-induced, each `K4` additionally yields its 6 spanning diamonds (its `C(4,2)`
 /// tip-pairs) — the diamond specialization of the `s(P,C)` expansion.
+///
+/// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
+/// deduped, directed inputs unioned) — see [`GraphAdapter`].
 pub fn find_diamonds<G>(g: G, induced: Induced) -> Vec<Diamond<G::NodeId>>
 where
     G: GraphAdapter,

@@ -13,3 +13,6 @@ categories = ["algorithms", "science", "mathematics"]
 [dependencies]
 petgraph = "0.8"
 rand = "0.8"
+
+[dev-dependencies]
+proptest = "1"

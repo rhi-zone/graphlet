@@ -21,6 +21,16 @@ use petgraph::EdgeType;
 /// All node-induced matches of `pattern` in `host`, each a vector indexed by pattern
 /// node with the matched host node index. Induced-native (no filtering).
 ///
+/// # Counting semantics: raw embeddings, not distinct node-sets
+///
+/// Each returned vector is one VF2 *embedding* (an ordered injection of pattern nodes
+/// into host nodes). Pattern automorphisms are **not** deduped: a symmetric pattern
+/// matched onto one host node-set yields `|Aut(pattern)|` separate embeddings here. For
+/// example a P3 (path `0–1–2`) on a triangle host yields 0 (P3 is not induced in a
+/// triangle), but a P3 on a host path `a–b–c` yields 2 embeddings (`a,b,c` and `c,b,a`)
+/// over the single node-set `{a,b,c}`. This differs from [`crate::catalog`], which
+/// reports *distinct occurrences* (node-sets) by dividing out `|Aut(P)|`.
+///
 /// `node_match` / `edge_match` gate a pattern element against a host element (return
 /// `true` to allow); pass `|_, _| true` to match on structure alone.
 pub fn induced_matches<Np, Ep, Nh, Eh, Ty, NM, EM>(
@@ -53,6 +63,9 @@ where
 }
 
 /// Count node-induced matches of `pattern` in `host` on structure alone.
+///
+/// Counts raw VF2 embeddings, including pattern automorphisms (no node-set dedup) —
+/// see [`induced_matches`].
 pub fn count_induced_matches<Np, Ep, Nh, Eh, Ty>(
     pattern: &Graph<Np, Ep, Ty>,
     host: &Graph<Nh, Eh, Ty>,

@@ -20,18 +20,46 @@ pub struct Instance<N> {
     pub class: ClassId,
 }
 
+/// The largest supported graphlet order.
+///
+/// A class is identified by a `u64` canonical mask packing `k(k-1)/2` upper-triangle
+/// bits; `k = 11` needs 55 bits (fits) while `k = 12` needs 66 (overflows `u64` and
+/// would *silently* corrupt the labelling). The census core is correct for `2..=11`,
+/// but note that canonicalization enumerates `k!` permutations, so orders past `k ≈ 8`
+/// are wildly expensive and the science-facing surface (GDV/orbits, catalog) is closed
+/// at `k ≤ 5`.
+pub const MAX_K: usize = 11;
+
 /// What to enumerate: connected induced subgraphs of order `k`.
+///
+/// `k` is validated at construction ([`Selector::connected_k_subsets`]); it is private
+/// so a `Selector` can never carry an out-of-range order.
 #[derive(Clone, Copy, Debug)]
 pub struct Selector {
-    /// Subgraph order.
-    pub k: usize,
+    /// Subgraph order, guaranteed in `2..=MAX_K`.
+    k: usize,
 }
 
 impl Selector {
     /// Select connected induced k-subsets.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `2 <= k <= MAX_K` (currently 11). `k < 2` is degenerate (a single
+    /// vertex is not a graphlet); `k > 11` overflows the `u64` canonical mask. Out-of-range
+    /// `k` is a programming error, so it panics rather than returning a `Result`.
     pub fn connected_k_subsets(k: usize) -> Self {
-        assert!(k >= 2, "graphlet order k must be >= 2");
+        assert!(
+            (2..=MAX_K).contains(&k),
+            "graphlet order k must be in 2..={MAX_K}, got {k}"
+        );
         Selector { k }
+    }
+
+    /// The subgraph order this selector enumerates.
+    #[inline]
+    pub fn k(&self) -> usize {
+        self.k
     }
 }
 
@@ -150,6 +178,10 @@ impl<N: Copy> Iterator for Instances<N> {
 /// The returned iterator owns an `O(V+E)` snapshot of `g`; it does not borrow `g`
 /// past construction. `enumerate(g, sel).collect()` materializes all instances
 /// (`O(instances)` memory) — use [`count`] to avoid that.
+///
+/// `g` is treated as a *simple undirected* graph: self-loops are stripped, parallel
+/// edges deduped, and directed inputs unioned. See [`GraphAdapter`] for the full
+/// precondition.
 pub fn enumerate<G>(g: G, sel: &Selector) -> Instances<G::NodeId>
 where
     G: GraphAdapter,
@@ -217,6 +249,9 @@ pub(crate) fn for_each_subset<N: Copy>(
 /// Fold the census as a stream: no [`Instance`] is allocated, so peak memory tracks
 /// graph size (`O(V+E)` for the snapshot plus `≤ #classes` for the map), not the
 /// number of subgraph instances.
+///
+/// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
+/// deduped, directed inputs unioned) — see [`GraphAdapter`].
 pub fn count<G>(g: G, sel: &Selector) -> Census
 where
     G: GraphAdapter,

@@ -184,6 +184,9 @@ impl<N: Copy> GdvTable<N> {
 /// One ESU pass per order attributes each node of each instance to its orbit; cost
 /// is a small constant factor over the class-only census. Pass a [`Registry`] so it
 /// can be reused across graphs.
+///
+/// `g` is treated as a *simple undirected* graph (self-loops stripped, parallel edges
+/// deduped, directed inputs unioned) — see [`GraphAdapter`].
 pub fn graphlet_degree_vectors<G>(g: G, reg: &Registry) -> GdvTable<G::NodeId>
 where
     G: GraphAdapter,

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use petgraph::graph::{Graph, NodeIndex, UnGraph};
 use petgraph::stable_graph::StableGraph;
 use petgraph::{Directed, Undirected};
+use proptest::prelude::*;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -562,4 +563,573 @@ fn diamond_catalog() {
     let dia = build_un(&[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4);
     assert_eq!(count_diamonds(&dia, Induced::Yes), 1);
     assert_eq!(count_diamonds(&dia, Induced::No), 1);
+}
+
+// ===========================================================================
+// PHASE-2 CORRECTNESS HARDENING
+// ===========================================================================
+//
+// Shared independent oracles / builders for the regression, edge-case and
+// property tests below.
+
+/// Undirected adjacency matrix (self-loops dropped, parallels deduped) — the
+/// independent ground-truth structure the crate is validated against.
+fn adj_matrix(edges: &[(usize, usize)], n: usize) -> Vec<Vec<bool>> {
+    let mut m = vec![vec![false; n]; n];
+    for &(a, b) in edges {
+        if a != b {
+            m[a][b] = true;
+            m[b][a] = true;
+        }
+    }
+    m
+}
+
+/// Independent canonical mask (min over k! perms of the packed upper triangle),
+/// computed from the adjacency matrix — decorrelated from `canonical_by`.
+fn indep_mask(m: &[Vec<bool>], sub: &[usize]) -> u64 {
+    let k = sub.len();
+    let mut best = u64::MAX;
+    for p in &perms(k) {
+        let mut mask = 0u64;
+        let mut bit = 0;
+        for i in 0..k {
+            for j in (i + 1)..k {
+                if m[sub[p[i]]][sub[p[j]]] {
+                    mask |= 1 << bit;
+                }
+                bit += 1;
+            }
+        }
+        best = best.min(mask);
+    }
+    best
+}
+
+/// Whether `sub` (global indices) induces a connected subgraph of `m`.
+fn mat_connected(m: &[Vec<bool>], sub: &[usize]) -> bool {
+    let k = sub.len();
+    if k == 0 {
+        return true;
+    }
+    let mut seen = vec![false; k];
+    let mut stack = vec![0usize];
+    seen[0] = true;
+    let mut cnt = 1;
+    while let Some(x) = stack.pop() {
+        for y in 0..k {
+            if !seen[y] && m[sub[x]][sub[y]] {
+                seen[y] = true;
+                cnt += 1;
+                stack.push(y);
+            }
+        }
+    }
+    cnt == k
+}
+
+/// Independent census (canonical-mask -> count) by combination enumeration —
+/// a fully decorrelated oracle for streaming `count`.
+fn census_oracle(m: &[Vec<bool>], n: usize, k: usize) -> HashMap<u64, u64> {
+    let mut out: HashMap<u64, u64> = HashMap::new();
+    if k > n {
+        return out;
+    }
+    let pool: Vec<usize> = (0..n).collect();
+    for sub in combos(&pool, k) {
+        if mat_connected(m, &sub) {
+            *out.entry(indep_mask(m, &sub)).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+/// Build a `StableGraph` whose live nodes carry the given undirected edge list but
+/// whose raw slot numbering is riddled with holes: a dummy node is interleaved before
+/// every real node, then all dummies are removed. This forces `to_index` to diverge
+/// from `node_count()` — the exact StableGraph-with-removed-nodes shape.
+fn build_stable_with_holes(edges: &[(usize, usize)], n: usize) -> StableGraph<(), (), Undirected> {
+    let mut g = StableGraph::<(), (), Undirected>::default();
+    let mut real = Vec::with_capacity(n);
+    let mut dummies = Vec::with_capacity(n);
+    for _ in 0..n {
+        dummies.push(g.add_node(()));
+        real.push(g.add_node(()));
+    }
+    for &(a, b) in edges {
+        g.add_edge(real[a], real[b], ());
+    }
+    for d in dummies {
+        g.remove_node(d);
+    }
+    g
+}
+
+/// Sorted multiset of GDV rows — node identity is not comparable across relabellings,
+/// but the multiset of graphlet-degree vectors is an isomorphism invariant.
+fn gdv_row_multiset<N: Copy>(t: &crate::GdvTable<N>) -> Vec<Vec<u64>> {
+    let mut rows: Vec<Vec<u64>> = (0..t.len()).map(|i| t.row(i).to_vec()).collect();
+    rows.sort();
+    rows
+}
+
+// ---------------------------------------------------------------------------
+// FIX 1 — StableGraph with removed nodes (holes) must not panic and must match
+// the equivalent hole-free graph across census / GDV / diamonds, k = 2..=5.
+// (Before the node_bound() fix, Snapshot::new panicked with an OOB index.)
+// ---------------------------------------------------------------------------
+#[test]
+fn stablegraph_holes_match_holefree() {
+    let reg = Registry::build();
+    let cases: Vec<(Vec<(usize, usize)>, usize)> = vec![
+        (complete_edges(5), 5),
+        (cycle_edges(6), 6),
+        (path_edges(7), 7),
+        (vec![(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4), // diamond
+        (random_edges(9, 0.4, 11), 9),
+        (random_edges(10, 0.5, 22), 10),
+    ];
+    for (edges, n) in &cases {
+        let holed = build_stable_with_holes(edges, *n);
+        let clean = build_un(edges, *n);
+
+        // Census parity for every supported small order.
+        for &k in &[2usize, 3, 4, 5] {
+            let sel = Selector::connected_k_subsets(k);
+            assert_eq!(
+                sorted(&count(&holed, &sel)),
+                sorted(&count(&clean, &sel)),
+                "holed StableGraph census mismatch n={n} k={k}"
+            );
+        }
+
+        // GDV parity (as an isomorphism-invariant row multiset).
+        assert_eq!(
+            gdv_row_multiset(&graphlet_degree_vectors(&holed, &reg)),
+            gdv_row_multiset(&graphlet_degree_vectors(&clean, &reg)),
+            "holed StableGraph GDV mismatch n={n}"
+        );
+
+        // Diamond parity (counts; node identities differ across the two graphs).
+        for ind in [Induced::Yes, Induced::No] {
+            assert_eq!(
+                count_diamonds(&holed, ind),
+                count_diamonds(&clean, ind),
+                "holed StableGraph diamond count mismatch n={n} {ind:?}"
+            );
+            assert_eq!(
+                find_diamonds(&holed, ind).len(),
+                find_diamonds(&clean, ind).len(),
+                "holed StableGraph diamond instances mismatch n={n} {ind:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FIX 2 — Selector k-range guard enforced at the public boundary (private field
+// + checked constructor). k in {0,1} is degenerate; k >= 12 overflows the u64
+// canonical mask (silent corruption before the guard).
+// ---------------------------------------------------------------------------
+#[test]
+#[should_panic(expected = "graphlet order k must be in 2")]
+fn selector_rejects_k0() {
+    let _ = Selector::connected_k_subsets(0);
+}
+
+#[test]
+#[should_panic(expected = "graphlet order k must be in 2")]
+fn selector_rejects_k1() {
+    let _ = Selector::connected_k_subsets(1);
+}
+
+#[test]
+#[should_panic(expected = "graphlet order k must be in 2")]
+fn selector_rejects_k12_mask_overflow() {
+    // k=12 packs 66 upper-triangle bits into a u64 => overflow. Must be rejected,
+    // not silently wrapped.
+    let _ = Selector::connected_k_subsets(12);
+}
+
+#[test]
+fn selector_boundary_k_values() {
+    // Lower and upper in-range boundaries construct cleanly and expose their order.
+    assert_eq!(Selector::connected_k_subsets(2).k(), 2);
+    assert_eq!(
+        Selector::connected_k_subsets(crate::census::MAX_K).k(),
+        crate::census::MAX_K
+    );
+    // A modest above-5 order (k=6) still enumerates without mask corruption:
+    // K6 has exactly one connected class (K6 itself) counted once.
+    let g = build_un(&complete_edges(6), 6);
+    let census = count(&g, &Selector::connected_k_subsets(6));
+    assert_eq!(census.values().sum::<u64>(), 1, "K6 has a single 6-subset");
+}
+
+// ---------------------------------------------------------------------------
+// FIX 3 — inputs are treated as simple graphs: self-loops stripped, parallel
+// edges deduped. Pattern::new instead REJECTS self-loop pattern edges. Pin both.
+// ---------------------------------------------------------------------------
+#[test]
+fn self_loops_and_parallel_edges_normalized() {
+    // A clean triangle: one triangle class instance at k=3.
+    let clean = build_un(&[(0, 1), (1, 2), (2, 0)], 3);
+    let clean_census = sorted(&count(&clean, &Selector::connected_k_subsets(3)));
+
+    // Triangle + a self-loop on vertex 0 => identical census (self-loop stripped).
+    let with_loop = build_un(&[(0, 1), (1, 2), (2, 0), (0, 0)], 3);
+    assert_eq!(
+        sorted(&count(&with_loop, &Selector::connected_k_subsets(3))),
+        clean_census,
+        "self-loop must be stripped"
+    );
+
+    // Triangle with tripled + reciprocal-directed-style parallel edges => identical.
+    let with_parallels = build_un(&[(0, 1), (0, 1), (1, 0), (1, 2), (1, 2), (2, 0)], 3);
+    assert_eq!(
+        sorted(&count(&with_parallels, &Selector::connected_k_subsets(3))),
+        clean_census,
+        "parallel edges must be deduped"
+    );
+
+    // A directed reciprocal pair collapses to one undirected edge (count k=2 == 1).
+    let dg = build_directed(&[(0, 1), (1, 0)], 2);
+    assert_eq!(
+        count(&dg, &Selector::connected_k_subsets(2))
+            .values()
+            .sum::<u64>(),
+        1,
+        "directed reciprocal edges collapse to one"
+    );
+}
+
+#[test]
+#[should_panic(expected = "self-loop")]
+fn pattern_rejects_self_loop() {
+    // The pattern side is asymmetric with the host side: it rejects self-loops.
+    let _ = Pattern::new(3, &[(0, 1), (1, 2), (2, 2)]);
+}
+
+// ---------------------------------------------------------------------------
+// FIX 4 — template arm returns RAW VF2 embeddings (each embedding, including
+// pattern automorphisms; no node-set dedup). Pin the documented counts.
+// ---------------------------------------------------------------------------
+#[test]
+fn template_counts_raw_embeddings() {
+    use crate::template::count_induced_matches;
+
+    // P3 (path 0-1-2) is NOT induced in a triangle host => 0 embeddings.
+    let p3 = build_un(&[(0, 1), (1, 2)], 3);
+    let triangle = build_un(&[(0, 1), (1, 2), (2, 0)], 3);
+    assert_eq!(
+        count_induced_matches(&p3, &triangle),
+        0,
+        "P3 not induced in K3"
+    );
+
+    // P3 on a host path a-b-c: one node-set {a,b,c}, but 2 embeddings (forward and
+    // reversed) — automorphisms are NOT deduped.
+    let host_path = build_un(&[(0, 1), (1, 2)], 3);
+    assert_eq!(
+        count_induced_matches(&p3, &host_path),
+        2,
+        "P3 yields |Aut(P3)|=2 raw embeddings over one node-set"
+    );
+
+    // Triangle pattern on a triangle host: 3! = 6 embeddings (|Aut(K3)| = 6).
+    assert_eq!(
+        count_induced_matches(&triangle, &triangle),
+        6,
+        "K3 in K3 yields |Aut(K3)|=6 raw embeddings"
+    );
+
+    // Two disjoint host triangles: still 6 embeddings each => 12 total, and each is a
+    // raw embedding (no node-set dedup), demonstrating the template semantics.
+    let two_tri = build_un(&[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)], 6);
+    assert_eq!(count_induced_matches(&triangle, &two_tri), 12);
+}
+
+// ---------------------------------------------------------------------------
+// HARDEN — explicit edge cases across all public entry points.
+// ---------------------------------------------------------------------------
+#[test]
+fn edge_cases_across_entry_points() {
+    let reg = Registry::build();
+
+    // Empty graph (n = 0).
+    let empty = build_un(&[], 0);
+    for &k in &[2usize, 3, 4, 5] {
+        assert!(count(&empty, &Selector::connected_k_subsets(k)).is_empty());
+        assert_eq!(
+            enumerate(&empty, &Selector::connected_k_subsets(k)).count(),
+            0
+        );
+    }
+    assert!(graphlet_degree_vectors(&empty, &reg).is_empty());
+    assert_eq!(count_diamonds(&empty, Induced::Yes), 0);
+    assert!(find_diamonds(&empty, Induced::No).is_empty());
+
+    // Single isolated node.
+    let single = build_un(&[], 1);
+    assert!(count(&single, &Selector::connected_k_subsets(2)).is_empty());
+    assert_eq!(graphlet_degree_vectors(&single, &reg).len(), 1);
+    assert!(graphlet_degree_vectors(&single, &reg)
+        .row(0)
+        .iter()
+        .all(|&x| x == 0));
+
+    // Fewer than k nodes.
+    let two = build_un(&[(0, 1)], 2);
+    assert!(count(&two, &Selector::connected_k_subsets(5)).is_empty());
+    // Exactly k: a single edge is the only 2-graphlet.
+    assert_eq!(
+        count(&two, &Selector::connected_k_subsets(2))
+            .values()
+            .sum::<u64>(),
+        1
+    );
+
+    // Disconnected multi-component: two triangles, k=3 => two triangle instances, no
+    // cross-component subset.
+    let two_tri = build_un(&[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)], 6);
+    assert_eq!(
+        count(&two_tri, &Selector::connected_k_subsets(3))
+            .values()
+            .sum::<u64>(),
+        2
+    );
+
+    // Directed input analyzed as undirected: directed triangle census == undirected.
+    let dtri = build_directed(&[(0, 1), (1, 2), (2, 0)], 3);
+    let utri = build_un(&[(0, 1), (1, 2), (2, 0)], 3);
+    assert_eq!(
+        sorted(&count(&dtri, &Selector::connected_k_subsets(3))),
+        sorted(&count(&utri, &Selector::connected_k_subsets(3)))
+    );
+
+    // StableGraph with holes but empty edge set: no panic, empty census.
+    let holed_empty = build_stable_with_holes(&[], 3);
+    assert!(count(&holed_empty, &Selector::connected_k_subsets(2)).is_empty());
+}
+
+// ===========================================================================
+// PROPERTY-BASED DIFFERENTIAL FUZZING (proptest).
+// ===========================================================================
+
+/// Build an undirected edge list from a bit vector over the `C(n,2)` vertex pairs.
+fn edges_from_bits(n: usize, bits: &[bool]) -> Vec<(usize, usize)> {
+    let mut e = Vec::new();
+    let mut idx = 0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if bits.get(idx).copied().unwrap_or(false) {
+                e.push((i, j));
+            }
+            idx += 1;
+        }
+    }
+    e
+}
+
+/// Strategy: (node count 0..=7, edge-presence bits for up to C(7,2)=21 pairs,
+/// a relabelling seed).
+fn graph_strategy() -> impl Strategy<Value = (usize, Vec<bool>, u64)> {
+    (0usize..=7).prop_flat_map(|n| {
+        let pairs = n * n.saturating_sub(1) / 2;
+        (
+            Just(n),
+            proptest::collection::vec(any::<bool>(), pairs),
+            any::<u64>(),
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(160))]
+
+    // (a) streaming count == recursive-driven count == enumerate() grouped by class,
+    //     and all == the independent combination-enumeration oracle. Also (b) the
+    //     class set is always a subset of the connected ground-truth classes, and (d)
+    //     the census is invariant under relabelling (Graph & StableGraph-with-holes).
+    #[test]
+    fn prop_census_differential((n, bits, seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let m = adj_matrix(&edges, n);
+        let g = build_un(&edges, n);
+
+        // Random relabelling + the two graph flavours that carry hole risk.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.shuffle(&mut StdRng::seed_from_u64(seed));
+        let gp = build_perm_un(&edges, n, &order);
+        let holed = build_stable_with_holes(&edges, n);
+
+        for k in 2..=5usize {
+            let sel = Selector::connected_k_subsets(k);
+            let oracle = census_oracle(&m, n, k);
+
+            // count() re-keyed to bare masks.
+            let by_mask: HashMap<u64, u64> = count(&g, &sel)
+                .into_iter()
+                .map(|(c, v)| (c.0, v))
+                .collect();
+            prop_assert_eq!(&by_mask, &oracle, "count vs oracle n={} k={}", n, k);
+
+            // enumerate() grouped by ClassId, re-keyed to masks.
+            let by_iter: HashMap<u64, u64> = census_via_iter(&g, k)
+                .into_iter()
+                .map(|(c, v)| (c.0, v))
+                .collect();
+            prop_assert_eq!(&by_iter, &oracle, "enumerate vs oracle n={} k={}", n, k);
+
+            // (b) only connected ground-truth classes ever appear.
+            let gt: HashSet<u64> = all_connected_classes(k).into_iter().collect();
+            for mask in by_mask.keys() {
+                prop_assert!(gt.contains(mask), "spurious class {} k={}", mask, k);
+            }
+
+            // (d) relabelling invariance across Graph and holed StableGraph.
+            prop_assert_eq!(sorted(&count(&gp, &sel)), sorted(&count(&g, &sel)));
+            prop_assert_eq!(sorted(&count(&holed, &sel)), sorted(&count(&g, &sel)));
+        }
+    }
+
+    // (c) GDV == brute-force per-node GDV oracle, and Σ_v GDV[o] == class_count *
+    //     orbit_size for all 73 orbits; plus holed-StableGraph GDV row-multiset parity.
+    #[test]
+    fn prop_gdv_differential((n, bits, _seed) in graph_strategy()) {
+        let reg = Registry::build();
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let snap = Snapshot::new(&g);
+        let table = graphlet_degree_vectors(&g, &reg);
+
+        // (c1) per-node GDV equals the independent combination-enumeration oracle.
+        let oracle = gdv_oracle(&snap, &reg);
+        for (v, orow) in oracle.iter().enumerate() {
+            prop_assert_eq!(table.row(v), orow.as_slice(), "GDV mismatch node {}", v);
+        }
+
+        // (c2) Σ_v GDV[o] == class_count(k,class) * orbit_size for every orbit.
+        let mut class_count: HashMap<(usize, u64), u64> = HashMap::new();
+        for k in 2..=5 {
+            let ps = perms(k);
+            for_each_subset(&snap, k, |sub| {
+                let class = canonical_by(k, &ps, |i, j| snap.adjacent(sub[i], sub[j]));
+                *class_count.entry((k, class)).or_insert(0) += 1;
+            });
+        }
+        for o in 0..reg.orbit_count() {
+            let (k, class, size) = reg.orbit_meta(o);
+            let sum_v: u64 = (0..table.len()).map(|v| table.row(v)[o]).sum();
+            let expect = class_count.get(&(k, class)).copied().unwrap_or(0) * size as u64;
+            prop_assert_eq!(sum_v, expect, "orbit {} sum mismatch", o);
+        }
+
+        // GDV row-multiset parity with the holed StableGraph.
+        let holed = build_stable_with_holes(&edges, n);
+        prop_assert_eq!(
+            gdv_row_multiset(&graphlet_degree_vectors(&holed, &reg)),
+            gdv_row_multiset(&table)
+        );
+    }
+
+    // (e) s(P,C) non-induced count == labelled-monomorphism oracle / |Aut(P)| for
+    //     every connected pattern P at k = 3,4,5.
+    #[test]
+    fn prop_non_induced_vs_monomorphism((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let snap = Snapshot::new(&g);
+        for k in 3..=5usize {
+            if n < k {
+                continue;
+            }
+            let ps = perms(k);
+            for mask in all_connected_classes(k) {
+                let padj = class_adj(mask, k);
+                let pedges: Vec<(usize, usize)> = (0..k)
+                    .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+                    .filter(|&(i, j)| padj[i].contains(&j))
+                    .collect();
+                let pat = Pattern::new(k, &pedges);
+                let aut = {
+                    let mut c = 0u64;
+                    for perm in &ps {
+                        let ok = (0..k).all(|i| {
+                            padj[i]
+                                .iter()
+                                .filter(|&&j| j > i)
+                                .all(|&j| padj[perm[i]].contains(&perm[j]))
+                        });
+                        if ok {
+                            c += 1;
+                        }
+                    }
+                    c
+                };
+                let predicted = count_pattern(&g, &pat, Induced::No);
+                let oracle = mono_labelled(&padj, &snap) / aut;
+                prop_assert_eq!(predicted, oracle, "non-induced mask={} k={}", mask, k);
+            }
+        }
+    }
+
+    // (f) template induced-native count / |Aut(P)| == the induced census count of the
+    //     pattern's class (links the VF2 arm to the census arm).
+    #[test]
+    fn prop_template_matches_induced_census((n, bits, _seed) in graph_strategy()) {
+        use crate::template::count_induced_matches;
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+
+        // A fixed battery of small connected patterns (k = 3,4).
+        let patterns: [(usize, Vec<(usize, usize)>); 5] = [
+            (3, vec![(0, 1), (1, 2)]),                          // P3
+            (3, vec![(0, 1), (1, 2), (2, 0)]),                  // triangle
+            (4, vec![(0, 1), (1, 2), (2, 3)]),                  // P4
+            (4, vec![(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]),  // diamond
+            (4, complete_edges(4)),                             // K4
+        ];
+        for (k, pedges) in &patterns {
+            if n < *k {
+                continue;
+            }
+            let pat_graph = build_un(pedges, *k);
+            let pat = Pattern::new(*k, pedges);
+            // |Aut(P)| = s(P,P) via the crate's own class self-count.
+            let ps = perms(*k);
+            let padj = {
+                let mut a = vec![Vec::new(); *k];
+                for &(x, y) in pedges {
+                    if !a[x].contains(&y) {
+                        a[x].push(y);
+                        a[y].push(x);
+                    }
+                }
+                a
+            };
+            let aut = ps
+                .iter()
+                .filter(|perm| {
+                    (0..*k).all(|i| {
+                        padj[i]
+                            .iter()
+                            .filter(|&&j| j > i)
+                            .all(|&j| padj[perm[i]].contains(&perm[j]))
+                    })
+                })
+                .count() as u64;
+
+            let raw = count_induced_matches(&pat_graph, &g) as u64;
+            let census = count(&g, &Selector::connected_k_subsets(*k));
+            let induced_nodesets = census.get(&pat.class_id()).copied().unwrap_or(0);
+            prop_assert_eq!(
+                raw / aut,
+                induced_nodesets,
+                "template raw/aut vs induced census k={}",
+                k
+            );
+            prop_assert_eq!(raw % aut, 0, "raw embeddings must be a multiple of |Aut|");
+        }
+    }
 }
