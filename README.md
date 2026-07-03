@@ -7,8 +7,12 @@ computes:
   folded by canonical isomorphism class),
 - per-node graphlet degree vectors and their distribution (GDV / GDD) across all 73
   orbits of the graphlets up to 5 nodes,
-- named-motif detection (diamonds), reporting both induced and non-induced counts,
-- induced matching of arbitrary template graphs via petgraph's VF2.
+- a named-motif catalog (paths, cycles, stars, complete graphs, the six connected 4-node
+  motifs, the diamond, plus a registry for arbitrary user patterns), with general
+  `find_motif` / `count_motif` queries reporting both induced and non-induced occurrences,
+- template matching of arbitrary graphs — induced via petgraph's VF2, and non-induced
+  (subgraph monomorphism) via this crate's own directed/undirected enumerator with
+  node/edge match predicates.
 
 It runs directly on petgraph's own types, generic over `Graph` and `StableGraph`, so it
 reads the graph you already have. It depends only on `petgraph` and `rand`.
@@ -49,11 +53,16 @@ assert_eq!(find_diamonds(&g, Induced::Yes).len(), 1);
   streams the same traversal into per-class counts.
 - Computes per-node graphlet degree vectors (GDV) and the graphlet degree distribution
   (GDD) across all 73 orbits.
-- Detects named motifs (diamonds), giving induced counts (read off the census) and
-  non-induced counts (derived from the induced census through a fixed conversion table,
-  not a separate enumerator).
-- Matches arbitrary user-supplied template graphs by induced subgraph isomorphism,
-  delegating to petgraph's VF2 `subgraph_isomorphisms_iter`.
+- Provides a named-motif catalog (`Pattern::path`/`cycle`/`star`/`complete`/`paw`/`claw`/
+  `diamond`, a `MotifCatalog` registry for arbitrary patterns) and general `find_motif` /
+  `count_motif` queries. Induced counts are read off the census; non-induced counts are
+  derived from the induced census through a fixed conversion table (not a separate
+  enumerator); instances are enumerated by the pattern-instance engine and deduped to
+  distinct occurrences. `find_diamonds` is a thin wrapper over `find_motif`.
+- Matches arbitrary user-supplied template graphs, in two semantics: induced subgraph
+  isomorphism (petgraph's VF2 `subgraph_isomorphisms_iter`) and non-induced subgraph
+  monomorphism (an ordered-backtracking enumerator owning this crate's own code, for
+  directed and undirected graphs, with node/edge match predicates).
 
 ## Scope
 
@@ -72,7 +81,8 @@ assert_eq!(find_diamonds(&g, Induced::Yes).len(), 1);
 - No neighborhood statistics (link prediction, assortativity, rich-club coefficients).
 - The 5-node census uses naive canonicalization and is not tuned for very large graphs,
   so it is slow on big inputs.
-- No non-induced matching of arbitrary templates (only induced template matching).
+- The named-motif catalog (`Pattern`, `find_motif` / `count_motif`) is bounded to k <= 5;
+  larger or weighted arbitrary templates are matched through the `template` engine directly.
 
 ## What to use instead
 

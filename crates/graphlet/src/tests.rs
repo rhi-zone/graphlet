@@ -18,10 +18,17 @@ use rand::{Rng, SeedableRng};
 use crate::canonical::{
     all_connected_classes, canonical_arg_by, canonical_by, class_to_adj, connected, perms,
 };
-use crate::catalog::{count_diamonds, count_pattern, find_diamonds, Induced, Pattern};
+use crate::catalog::{
+    count_diamonds, count_motif, count_pattern, find_diamonds, find_motif, Induced, MotifCatalog,
+    Pattern,
+};
 use crate::census::{count, enumerate, for_each_subset, Census, Selector};
 use crate::orbit::{graphlet_degree_vectors, Registry};
 use crate::snapshot::Snapshot;
+use crate::template::{
+    count_induced_matches, count_monomorphisms, count_monomorphisms_unlabelled, monomorphisms,
+    monomorphisms_unlabelled,
+};
 use crate::ClassId;
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1137,650 @@ proptest! {
                 k
             );
             prop_assert_eq!(raw % aut, 0, "raw embeddings must be a multiple of |Aut|");
+        }
+    }
+}
+
+// ===========================================================================
+// PHASE-1 MOTIF ENGINE: monomorphism enumerator + general motif catalog.
+// ===========================================================================
+//
+// Independent brute-force oracles (all-injective-map enumeration over adjacency
+// matrices) — fully decorrelated from the ordered-backtracking enumerator and from
+// petgraph VF2.
+
+/// Enumerate every injective map `0..pk -> 0..nh` and hand each to `f`.
+fn injective_maps(pk: usize, nh: usize, mut f: impl FnMut(&[usize])) {
+    fn rec(
+        i: usize,
+        pk: usize,
+        nh: usize,
+        a: &mut Vec<usize>,
+        u: &mut [bool],
+        f: &mut impl FnMut(&[usize]),
+    ) {
+        if i == pk {
+            f(a);
+            return;
+        }
+        for h in 0..nh {
+            if u[h] {
+                continue;
+            }
+            a[i] = h;
+            u[h] = true;
+            rec(i + 1, pk, nh, a, u, f);
+            u[h] = false;
+        }
+    }
+    if pk > nh {
+        return; // no injection possible
+    }
+    rec(0, pk, nh, &mut vec![0; pk], &mut vec![false; nh], &mut f);
+}
+
+/// Directed adjacency matrix: `m[a][b]` iff edge `a -> b` (self-loops dropped).
+fn dir_matrix(edges: &[(usize, usize)], n: usize) -> Vec<Vec<bool>> {
+    let mut m = vec![vec![false; n]; n];
+    for &(a, b) in edges {
+        if a != b {
+            m[a][b] = true;
+        }
+    }
+    m
+}
+
+/// Brute-force labelled monomorphism count: injective maps where every (directed)
+/// pattern edge lands on a host edge. `hm` is the host adjacency matrix (symmetric for
+/// undirected hosts, directed otherwise); `pedges` are the pattern's directed pairs.
+fn bf_mono(pedges: &[(usize, usize)], pk: usize, hm: &[Vec<bool>], nh: usize) -> usize {
+    let mut c = 0usize;
+    injective_maps(pk, nh, |map| {
+        if pedges.iter().all(|&(i, j)| hm[map[i]][map[j]]) {
+            c += 1;
+        }
+    });
+    c
+}
+
+/// Brute-force labelled induced (edge-reflecting) subgraph-isomorphism count: injective
+/// maps where an ordered image pair is a host edge *iff* the pattern pair is an edge.
+fn bf_induced(pm: &[Vec<bool>], pk: usize, hm: &[Vec<bool>], nh: usize) -> usize {
+    let mut c = 0usize;
+    injective_maps(pk, nh, |map| {
+        let ok = (0..pk).all(|i| (0..pk).all(|j| i == j || pm[i][j] == hm[map[i]][map[j]]));
+        if ok {
+            c += 1;
+        }
+    });
+    c
+}
+
+/// A battery of small connected undirected patterns as (k, edges).
+fn undirected_pattern_battery() -> Vec<(usize, Vec<(usize, usize)>)> {
+    vec![
+        (2, vec![(0, 1)]),                                 // edge
+        (3, vec![(0, 1), (1, 2)]),                         // P3
+        (3, complete_edges(3)),                            // triangle
+        (4, vec![(0, 1), (1, 2), (2, 3)]),                 // P4
+        (4, star_edges(4)),                                // claw
+        (4, cycle_edges(4)),                               // C4
+        (4, vec![(0, 1), (1, 2), (2, 0), (0, 3)]),         // paw
+        (4, vec![(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]), // diamond
+        (4, complete_edges(4)),                            // K4
+        (5, path_edges(5)),                                // P5
+        (5, cycle_edges(5)),                               // C5
+    ]
+}
+
+/// Structured + fuzzed undirected hosts as (edges, n).
+fn undirected_host_battery() -> Vec<(Vec<(usize, usize)>, usize)> {
+    let mut hosts: Vec<(Vec<(usize, usize)>, usize)> = Vec::new();
+    for n in [4usize, 5, 6, 7] {
+        hosts.push((path_edges(n), n));
+        hosts.push((cycle_edges(n), n));
+        hosts.push((star_edges(n), n));
+        hosts.push((complete_edges(n), n));
+    }
+    // Petersen graph (3-regular, 10 nodes).
+    hosts.push((
+        vec![
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 0), // outer C5
+            (5, 7),
+            (7, 9),
+            (9, 6),
+            (6, 8),
+            (8, 5), // inner pentagram
+            (0, 5),
+            (1, 6),
+            (2, 7),
+            (3, 8),
+            (4, 9), // spokes
+        ],
+        10,
+    ));
+    // 3-cube Q3 (bipartite, 8 nodes).
+    hosts.push((
+        vec![
+            (0, 1),
+            (1, 3),
+            (3, 2),
+            (2, 0), // bottom face
+            (4, 5),
+            (5, 7),
+            (7, 6),
+            (6, 4), // top face
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7), // verticals
+        ],
+        8,
+    ));
+    // Complete bipartite K_{2,3}.
+    hosts.push((vec![(0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)], 5));
+    for seed in 0..12u64 {
+        let n = 6 + (seed as usize % 4);
+        hosts.push((random_edges(n, 0.35, seed), n));
+    }
+    hosts
+}
+
+// ---------------------------------------------------------------------------
+// [P1-a] Monomorphism enumerator (undirected) vs brute-force oracle, over the
+// adversarial + fuzzed host battery and the small-pattern battery. Also pins the
+// instance/count agreement and validity of every returned embedding.
+// ---------------------------------------------------------------------------
+#[test]
+fn monomorphism_enumerator_vs_bruteforce_undirected() {
+    let patterns = undirected_pattern_battery();
+    let hosts = undirected_host_battery();
+    for (pk, pedges) in &patterns {
+        let pat = build_un(pedges, *pk);
+        for (hedges, n) in &hosts {
+            let host = build_un(hedges, *n);
+            let hm = adj_matrix(hedges, *n);
+            let oracle = bf_mono(pedges, *pk, &hm, *n);
+
+            let insts = monomorphisms_unlabelled(&pat, &host);
+            let cnt = count_monomorphisms_unlabelled(&pat, &host);
+            assert_eq!(cnt, oracle, "count k={pk} host n={n}");
+            assert_eq!(insts.len(), oracle, "instances k={pk} host n={n}");
+
+            // Every returned embedding is a valid injective edge-preserving map.
+            for e in &insts {
+                assert_eq!(e.len(), *pk);
+                let uniq: HashSet<usize> = e.iter().copied().collect();
+                assert_eq!(uniq.len(), *pk, "embedding must be injective");
+                for &(i, j) in pedges {
+                    assert!(
+                        hm[e[i]][e[j]],
+                        "embedding must preserve pattern edge ({i},{j})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [P1-b] Monomorphism enumerator (DIRECTED) vs brute-force oracle. Directedness is
+// honoured: a pattern arc must land on a host arc in the matching direction.
+// ---------------------------------------------------------------------------
+#[test]
+fn monomorphism_enumerator_vs_bruteforce_directed() {
+    // Directed patterns (arcs) as (k, arcs).
+    let patterns: Vec<(usize, Vec<(usize, usize)>)> = vec![
+        (2, vec![(0, 1)]),                         // single arc
+        (3, vec![(0, 1), (1, 2)]),                 // directed P3
+        (3, vec![(0, 1), (1, 2), (0, 2)]),         // feed-forward loop (FFL)
+        (3, vec![(0, 1), (1, 2), (2, 0)]),         // directed 3-cycle
+        (4, vec![(0, 1), (0, 2), (3, 1), (3, 2)]), // bi-fan
+    ];
+    let mut hosts: Vec<(Vec<(usize, usize)>, usize)> = vec![
+        (vec![(0, 1), (1, 2), (0, 2)], 3),               // one FFL
+        (vec![(0, 1), (1, 2), (2, 0)], 3),               // directed triangle
+        (vec![(0, 1), (0, 2), (3, 1), (3, 2)], 4),       // one bi-fan
+        ((0..5).map(|i| (i, (i + 1) % 5)).collect(), 5), // directed C5
+    ];
+    for seed in 0..14u64 {
+        let n = 5 + (seed as usize % 3);
+        // Random directed edges (ordered pairs, both directions independently possible).
+        let mut rng = StdRng::seed_from_u64(seed + 100);
+        let mut e = Vec::new();
+        for a in 0..n {
+            for b in 0..n {
+                if a != b && rng.gen::<f64>() < 0.3 {
+                    e.push((a, b));
+                }
+            }
+        }
+        hosts.push((e, n));
+    }
+
+    for (pk, parcs) in &patterns {
+        let pat = build_directed(parcs, *pk);
+        for (harcs, n) in &hosts {
+            let host = build_directed(harcs, *n);
+            let hm = dir_matrix(harcs, *n);
+            let oracle = bf_mono(parcs, *pk, &hm, *n);
+            let cnt = count_monomorphisms_unlabelled(&pat, &host);
+            let insts = monomorphisms_unlabelled(&pat, &host);
+            assert_eq!(cnt, oracle, "directed count k={pk} host n={n}");
+            assert_eq!(insts.len(), oracle, "directed instances k={pk} host n={n}");
+            for e in &insts {
+                for &(i, j) in parcs {
+                    assert!(
+                        hm[e[i]][e[j]],
+                        "directed embedding must preserve arc ({i},{j})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [P1-c] Node / edge match predicates gate the monomorphism search.
+// ---------------------------------------------------------------------------
+#[test]
+fn monomorphism_predicates_gate_matches() {
+    fn build_labeled_dir(
+        nodes: &[char],
+        edges: &[(usize, usize, i32)],
+    ) -> Graph<char, i32, Directed> {
+        let mut g = Graph::<char, i32, Directed>::new();
+        let idx: Vec<_> = nodes.iter().map(|&c| g.add_node(c)).collect();
+        for &(a, b, w) in edges {
+            g.add_edge(idx[a], idx[b], w);
+        }
+        g
+    }
+
+    // Host: directed path x -10-> y -20-> x, node weights [x, y, x].
+    let host = build_labeled_dir(&['x', 'y', 'x'], &[(0, 1, 10), (1, 2, 20)]);
+    // Pattern: single arc a -10-> b, node weights [x, y].
+    let pat = build_labeled_dir(&['x', 'y'], &[(0, 1, 10)]);
+
+    // Structure only: pattern arc 0->1 with p0 in {any}, p1 in {any}; host arcs 0->1,1->2.
+    // 2 injective arc placements (0->1 and 1->2).
+    assert_eq!(
+        count_monomorphisms(&pat, &host, |_, _| true, |_, _| true),
+        2
+    );
+
+    // Node match (labels equal): p0='x' -> host 'x' (0 or 2), p1='y' -> host 'y' (1).
+    // Host arcs into node 1 from an 'x': only 0->1. So exactly 1.
+    let node_eq = |p: &char, h: &char| p == h;
+    assert_eq!(count_monomorphisms(&pat, &host, node_eq, |_, _| true), 1);
+
+    // Edge match too (weight 10): 0->1 has weight 10 => still 1.
+    let edge_eq = |p: &i32, h: &i32| p == h;
+    assert_eq!(count_monomorphisms(&pat, &host, node_eq, edge_eq), 1);
+
+    // Edge match requiring weight 20 on a weight-10 pattern arc => 0.
+    let pat20 = build_labeled_dir(&['x', 'y'], &[(0, 1, 20)]);
+    assert_eq!(count_monomorphisms(&pat20, &host, node_eq, edge_eq), 0);
+
+    // The returned embedding under full matching is the arc 0->1.
+    let insts = monomorphisms(&pat, &host, node_eq, edge_eq);
+    assert_eq!(insts, vec![vec![0, 1]]);
+}
+
+// ---------------------------------------------------------------------------
+// [P1-d] CROSS-CHECK: for connected patterns at k <= 5, the monomorphism
+// enumerator's non-induced count / |Aut(P)| equals the verified s(P,C)-derived
+// count_pattern(Induced::No), and the raw count equals the census-independent
+// labelled-monomorphism oracle.
+// ---------------------------------------------------------------------------
+#[test]
+fn monomorphism_cross_check_spc() {
+    let hosts = undirected_host_battery();
+    for k in 3..=5usize {
+        let ps = perms(k);
+        for mask in all_connected_classes(k) {
+            let padj = class_adj(mask, k);
+            let pedges: Vec<(usize, usize)> = (0..k)
+                .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+                .filter(|&(i, j)| padj[i].contains(&j))
+                .collect();
+            let pat = Pattern::new(k, &pedges);
+            let pat_g = build_un(&pedges, k);
+            let aut = ps
+                .iter()
+                .filter(|perm| {
+                    (0..k).all(|i| {
+                        padj[i]
+                            .iter()
+                            .filter(|&&j| j > i)
+                            .all(|&j| padj[perm[i]].contains(&perm[j]))
+                    })
+                })
+                .count() as u64;
+            for (hedges, n) in &hosts {
+                if *n < k {
+                    continue;
+                }
+                let host = build_un(hedges, *n);
+                let hm = adj_matrix(hedges, *n);
+                let raw = count_monomorphisms_unlabelled(&pat_g, &host) as u64;
+                // raw == independent labelled-monomorphism oracle.
+                assert_eq!(raw, bf_mono(&pedges, k, &hm, *n) as u64, "raw vs oracle");
+                // raw / |Aut(P)| == verified s(P,C) fast-path count.
+                assert_eq!(
+                    raw / aut,
+                    count_pattern(&host, &pat, Induced::No),
+                    "enumerator vs s(P,C) mask={mask} k={k} n={n}"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [P1-e] Induced arm: petgraph VF2 count vs an independent edge-reflecting
+// brute-force oracle (cross-checks the VF2 delegation too).
+// ---------------------------------------------------------------------------
+#[test]
+fn induced_matches_vs_bruteforce() {
+    let patterns = undirected_pattern_battery();
+    let hosts = undirected_host_battery();
+    for (pk, pedges) in &patterns {
+        let pat = build_un(pedges, *pk);
+        let pm = adj_matrix(pedges, *pk);
+        for (hedges, n) in &hosts {
+            let host = build_un(hedges, *n);
+            let hm = adj_matrix(hedges, *n);
+            assert_eq!(
+                count_induced_matches(&pat, &host),
+                bf_induced(&pm, *pk, &hm, *n),
+                "induced VF2 vs oracle k={pk} n={n}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [P1-f] find_motif returns distinct occurrences whose count == count_motif, for
+// both semantics, across named motifs and the adversarial host battery. Also pins
+// each returned mapping as a valid, distinct-node occurrence.
+// ---------------------------------------------------------------------------
+#[test]
+fn find_motif_matches_count_and_is_valid() {
+    let named: Vec<(usize, Vec<(usize, usize)>)> = undirected_pattern_battery();
+    let hosts = undirected_host_battery();
+    for (pk, pedges) in &named {
+        let pat = Pattern::new(*pk, pedges);
+        for (hedges, n) in &hosts {
+            let g = build_un(hedges, *n);
+            let hm = adj_matrix(hedges, *n);
+            for ind in [Induced::Yes, Induced::No] {
+                let insts = find_motif(&g, &pat, ind);
+                let cnt = count_motif(&g, &pat, ind);
+                assert_eq!(
+                    insts.len() as u64,
+                    cnt,
+                    "find vs count k={pk} n={n} {ind:?}"
+                );
+
+                let mut nodesets: HashSet<Vec<usize>> = HashSet::new();
+                for m in &insts {
+                    let idxs: Vec<usize> = m.iter().map(|nid| nid.index()).collect();
+                    let uniq: HashSet<usize> = idxs.iter().copied().collect();
+                    assert_eq!(uniq.len(), *pk, "occurrence nodes distinct");
+                    // Every pattern edge is present in the host (both semantics).
+                    for &(i, j) in pedges {
+                        assert!(hm[idxs[i]][idxs[j]], "occurrence preserves edge");
+                    }
+                    if ind == Induced::Yes {
+                        // Induced: at most one representative per node-set.
+                        let mut s = idxs.clone();
+                        s.sort_unstable();
+                        assert!(nodesets.insert(s), "induced occurrences distinct node-sets");
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [P1-g] Named-motif constructors and the MotifCatalog registry.
+// ---------------------------------------------------------------------------
+#[test]
+fn named_motifs_and_catalog() {
+    // Orders.
+    assert_eq!(Pattern::path(5).order(), 5);
+    assert_eq!(Pattern::cycle(4).order(), 4);
+    assert_eq!(Pattern::star(5).order(), 5);
+    assert_eq!(Pattern::complete(4).order(), 4);
+    assert_eq!(Pattern::paw().order(), 4);
+
+    // Aliases coincide as classes.
+    assert_eq!(
+        Pattern::triangle().class_id(),
+        Pattern::complete(3).class_id()
+    );
+    assert_eq!(Pattern::claw().class_id(), Pattern::star(4).class_id());
+    assert_eq!(
+        Pattern::diamond().class_id(),
+        Pattern::new(4, &[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]).class_id()
+    );
+
+    // The six connected 4-node motifs are pairwise distinct classes.
+    let four: Vec<ClassId> = [
+        Pattern::path(4),
+        Pattern::claw(),
+        Pattern::cycle(4),
+        Pattern::paw(),
+        Pattern::diamond(),
+        Pattern::complete(4),
+    ]
+    .iter()
+    .map(Pattern::class_id)
+    .collect();
+    let uniq: HashSet<ClassId> = four.iter().copied().collect();
+    assert_eq!(uniq.len(), 6, "the six 4-node motifs are distinct classes");
+
+    // Structural sanity: a single C4 host has exactly one induced 4-cycle, zero K4.
+    let c4 = build_un(&cycle_edges(4), 4);
+    assert_eq!(count_motif(&c4, &Pattern::cycle(4), Induced::Yes), 1);
+    assert_eq!(count_motif(&c4, &Pattern::complete(4), Induced::Yes), 0);
+    // Star S5 host: exactly one induced claw around the center choosing 3 of 4 leaves? No —
+    // K_{1,4} has C(4,3)=4 induced claws.
+    let s5 = build_un(&star_edges(5), 5);
+    assert_eq!(count_motif(&s5, &Pattern::claw(), Induced::Yes), 4);
+
+    // Registry.
+    let mut cat = MotifCatalog::standard();
+    assert_eq!(cat.len(), 12);
+    assert!(cat.get("diamond").is_some());
+    assert!(cat.get("nope").is_none());
+    assert_eq!(
+        cat.get("triangle").unwrap().class_id(),
+        Pattern::triangle().class_id()
+    );
+    let prev = cat.register("mine", Pattern::cycle(5));
+    assert!(prev.is_none());
+    assert_eq!(cat.len(), 13);
+    assert_eq!(
+        cat.get("mine").unwrap().class_id(),
+        Pattern::cycle(5).class_id()
+    );
+    // names() sorted and contains registered entries.
+    let names = cat.names();
+    assert!(names.windows(2).all(|w| w[0] <= w[1]), "names sorted");
+    assert!(names.contains(&"mine") && names.contains(&"k5"));
+
+    let empty = MotifCatalog::new();
+    assert!(empty.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// [P1-h] Motif-engine edge cases: pattern larger than host, empty / single-node /
+// disconnected hosts, across the enumerator and find_motif.
+// ---------------------------------------------------------------------------
+#[test]
+fn motif_engine_edge_cases() {
+    // Pattern larger than host: no injection possible.
+    let k4_pat = build_un(&complete_edges(4), 4);
+    let triangle = build_un(&complete_edges(3), 3);
+    assert_eq!(count_monomorphisms_unlabelled(&k4_pat, &triangle), 0);
+    assert!(monomorphisms_unlabelled(&k4_pat, &triangle).is_empty());
+    let dia = Pattern::diamond();
+    let tri_host = build_un(&complete_edges(3), 3);
+    assert!(find_motif(&tri_host, &dia, Induced::No).is_empty());
+    assert_eq!(count_motif(&tri_host, &dia, Induced::Yes), 0);
+
+    // Empty host.
+    let empty: UnGraph<(), ()> = build_un(&[], 0);
+    let p3 = build_un(&[(0, 1), (1, 2)], 3);
+    assert_eq!(count_monomorphisms_unlabelled(&p3, &empty), 0);
+    assert!(find_motif(&empty, &Pattern::path(3), Induced::No).is_empty());
+
+    // Single isolated node vs an edge pattern.
+    let single = build_un(&[], 1);
+    let edge = build_un(&[(0, 1)], 2);
+    assert_eq!(count_monomorphisms_unlabelled(&edge, &single), 0);
+
+    // Disconnected host: two triangles. A triangle pattern has 2 distinct occurrences
+    // (one per component) and 12 raw monomorphisms (6 per component).
+    let two_tri = build_un(&[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)], 6);
+    let tri_pat = build_un(&complete_edges(3), 3);
+    assert_eq!(count_monomorphisms_unlabelled(&tri_pat, &two_tri), 12);
+    assert_eq!(
+        find_motif(&two_tri, &Pattern::triangle(), Induced::Yes).len(),
+        2
+    );
+    assert_eq!(
+        find_motif(&two_tri, &Pattern::triangle(), Induced::No).len(),
+        2
+    );
+
+    // Self-loop policy: the template arm honours a literal host self-loop (unlike the
+    // census, which strips them). A self-loop pattern needs a host self-loop.
+    let mut loop_pat = Graph::<(), (), Undirected>::new_undirected();
+    let lp = loop_pat.add_node(());
+    loop_pat.add_edge(lp, lp, ());
+    let mut host_loop = Graph::<(), (), Undirected>::new_undirected();
+    let a = host_loop.add_node(());
+    let b = host_loop.add_node(());
+    host_loop.add_edge(a, a, ());
+    host_loop.add_edge(a, b, ());
+    // The single-vertex-with-loop pattern maps only to the looped host vertex.
+    assert_eq!(count_monomorphisms_unlabelled(&loop_pat, &host_loop), 1);
+    assert_eq!(
+        monomorphisms_unlabelled(&loop_pat, &host_loop),
+        vec![vec![0]]
+    );
+}
+
+// ===========================================================================
+// PHASE-1 PROPERTY-BASED DIFFERENTIAL FUZZING.
+// ===========================================================================
+
+/// Build a directed edge list (ordered pairs) from a bit vector over all n*(n-1)
+/// ordered off-diagonal pairs.
+fn dir_edges_from_bits(n: usize, bits: &[bool]) -> Vec<(usize, usize)> {
+    let mut e = Vec::new();
+    let mut idx = 0;
+    for i in 0..n {
+        for j in 0..n {
+            if i != j {
+                if bits.get(idx).copied().unwrap_or(false) {
+                    e.push((i, j));
+                }
+                idx += 1;
+            }
+        }
+    }
+    e
+}
+
+fn dir_graph_strategy() -> impl Strategy<Value = (usize, Vec<bool>)> {
+    (0usize..=6).prop_flat_map(|n| {
+        let pairs = n * n.saturating_sub(1);
+        (Just(n), proptest::collection::vec(any::<bool>(), pairs))
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(120))]
+
+    // (g) monomorphism enumerator (undirected) == brute-force oracle, and instance
+    //     count == streaming count, over the small-pattern battery and fuzzed hosts.
+    #[test]
+    fn prop_monomorphism_differential_undirected((n, bits, _s) in graph_strategy()) {
+        let hedges = edges_from_bits(n, &bits);
+        let hm = adj_matrix(&hedges, n);
+        let host = build_un(&hedges, n);
+        for (pk, pedges) in undirected_pattern_battery() {
+            if pk > n {
+                prop_assert_eq!(count_monomorphisms_unlabelled(&build_un(&pedges, pk), &host), 0);
+                continue;
+            }
+            let pat = build_un(&pedges, pk);
+            let oracle = bf_mono(&pedges, pk, &hm, n);
+            let cnt = count_monomorphisms_unlabelled(&pat, &host);
+            let insts = monomorphisms_unlabelled(&pat, &host);
+            prop_assert_eq!(cnt, oracle, "count k={} n={}", pk, n);
+            prop_assert_eq!(insts.len(), oracle, "instances k={} n={}", pk, n);
+        }
+    }
+
+    // (h) monomorphism enumerator (DIRECTED) == brute-force oracle, honouring arc
+    //     direction, over fuzzed directed hosts and a directed-pattern battery.
+    #[test]
+    fn prop_monomorphism_differential_directed((n, bits) in dir_graph_strategy()) {
+        let harcs = dir_edges_from_bits(n, &bits);
+        let hm = dir_matrix(&harcs, n);
+        let host = build_directed(&harcs, n);
+        let patterns: Vec<(usize, Vec<(usize, usize)>)> = vec![
+            (2, vec![(0, 1)]),
+            (3, vec![(0, 1), (1, 2)]),
+            (3, vec![(0, 1), (1, 2), (0, 2)]),   // FFL
+            (3, vec![(0, 1), (1, 2), (2, 0)]),   // directed C3
+            (4, vec![(0, 1), (0, 2), (3, 1), (3, 2)]), // bi-fan
+        ];
+        for (pk, parcs) in patterns {
+            if pk > n {
+                continue;
+            }
+            let pat = build_directed(&parcs, pk);
+            prop_assert_eq!(
+                count_monomorphisms_unlabelled(&pat, &host),
+                bf_mono(&parcs, pk, &hm, n),
+                "directed k={} n={}", pk, n
+            );
+        }
+    }
+
+    // (i) find_motif distinct-occurrence count == count_motif (the s(P,C)/census fast
+    //     path), for both semantics and every named motif; and induced occurrences hit
+    //     distinct node-sets.
+    #[test]
+    fn prop_find_motif_matches_count((n, bits, _s) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        for (pk, pedges) in undirected_pattern_battery() {
+            let pat = Pattern::new(pk, &pedges);
+            for ind in [Induced::Yes, Induced::No] {
+                let insts = find_motif(&g, &pat, ind);
+                prop_assert_eq!(insts.len() as u64, count_motif(&g, &pat, ind),
+                    "k={} n={} {:?}", pk, n, ind);
+                if ind == Induced::Yes {
+                    let mut sets: HashSet<Vec<usize>> = HashSet::new();
+                    for m in &insts {
+                        let mut s: Vec<usize> = m.iter().map(|nid| nid.index()).collect();
+                        s.sort_unstable();
+                        prop_assert!(sets.insert(s), "induced node-sets distinct");
+                    }
+                }
+            }
         }
     }
 }

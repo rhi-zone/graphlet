@@ -30,12 +30,15 @@ Open threads for `graphlet`, from ADR-0290 (rhi ecosystem) and the motif-engine 
     over petgraph types, the cohesion case for re-homing these weakens. The true
     algorithmic voids above are unaffected.
 
-## Deferred by decision (no beneficiary today)
+## Resolved
 
-- **Non-induced (monomorphism) arbitrary-template enumerator.** Reserved as a future
-  additive method / type-gated entry — never an erroring runtime toggle. Gate: a
-  concrete consumer needing non-induced matching of a pattern that is (a) not in the
-  catalog and (b) needs actual instances, not counts.
+- **Non-induced (monomorphism) arbitrary-template enumerator.** Implemented as an
+  additive method in `template` (`monomorphisms` / `count_monomorphisms` + unlabelled
+  variants): ordered backtracking, directed + undirected, node/edge predicates,
+  edge-preserving. Verified against an independent all-injective-map brute-force oracle
+  (undirected + directed batteries incl. Petersen / Q3 / K_{2,3} + proptest fuzzing) and
+  cross-checked against the verified `s(P,C)` fast path at k ≤ 5 (raw/|Aut| equality).
+  Consumed by the general `catalog::find_motif` / `find_diamonds` instance queries.
 
 ## Pre-publish
 

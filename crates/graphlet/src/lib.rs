@@ -34,18 +34,30 @@
 //!
 //! # Named motifs
 //!
-//! [`catalog`] provides named-motif queries (seeded with the diamond). The census /
-//! catalog arm threads [`Induced`](catalog::Induced): induced counts are read
-//! directly off the census; non-induced (monomorphism) counts are derived from the
-//! induced census via a fixed `s(P,C)` table — no separate monomorphism enumerator.
+//! [`catalog`] provides a real motif catalog: named [`Pattern`](catalog::Pattern)
+//! constructors for the standard small motifs (path `P_k`, cycle `C_k`, star, complete
+//! `K_k`, the six connected 4-node motifs, the diamond), a
+//! [`MotifCatalog`](catalog::MotifCatalog) to register and query arbitrary patterns by
+//! name, and the general motif queries [`find_motif`](catalog::find_motif) /
+//! [`count_motif`](catalog::count_motif) (with [`find_diamonds`](catalog::find_diamonds)
+//! now a thin wrapper). Arbitrary connected patterns are countable directly via
+//! [`Pattern::new`](catalog::Pattern::new) + [`count_pattern`](catalog::count_pattern).
 //!
-//! # Template matching
+//! The census / catalog arm threads [`Induced`](catalog::Induced): induced *counts* are
+//! read off the census and non-induced *counts* use the verified `s(P,C)` derivation (no
+//! enumerator needed) at `k <= 5`; *instances* ([`find_motif`](catalog::find_motif)) are
+//! enumerated by the pattern-instance engine below and deduped to distinct occurrences.
 //!
-//! [`template`] is a thin parallel arm delegating to petgraph's VF2
-//! `subgraph_isomorphisms_iter`, which is **node-induced native**. Non-induced
-//! matching of an arbitrary template is deliberately deferred (see [`template`] and
-//! ADR-0290) — it has no grounding beneficiary today and cannot reuse the k-bounded
-//! `s(P,C)` trick.
+//! # Template matching (the pattern-instance engine)
+//!
+//! [`template`] matches an arbitrary petgraph query graph against a host in two
+//! honestly-distinct semantics, unbounded in `k`, honouring node/edge predicates and
+//! directedness: **induced** ([`induced_matches`](template::induced_matches)) delegates
+//! to petgraph's node-induced-native VF2 `subgraph_isomorphisms_iter`, and **non-induced
+//! / monomorphism** ([`monomorphisms`](template::monomorphisms)) is this crate's own
+//! ordered-backtracking edge-preserving enumerator (petgraph provides no monomorphism
+//! search; it cannot be recovered by filtering the induced output). Both return raw
+//! embeddings; divide by `|Aut(P)|` for distinct occurrences.
 //!
 //! # Example
 //!
