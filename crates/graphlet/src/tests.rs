@@ -2253,3 +2253,544 @@ proptest! {
         }
     }
 }
+
+// ===========================================================================
+// PHASE-3 SIGNIFICANCE TESTS
+// ===========================================================================
+
+use crate::rim::significance::{
+    census_significance_profile, compute_significance_stats, motif_significance, NullModel,
+    SignificanceEntry,
+};
+
+// ---------------------------------------------------------------------------
+// [S1] Mechanics: hand-computed exact verification of compute_significance_stats.
+// ---------------------------------------------------------------------------
+
+/// Helper: check every field of a SignificanceEntry against hand-computed values.
+/// `eps` is the floating-point tolerance for f64 comparisons.
+#[allow(clippy::too_many_arguments)]
+fn assert_sig_entry(
+    entry: &SignificanceEntry,
+    observed: u64,
+    null_mean: f64,
+    null_std: f64,
+    z_score: f64,
+    p_value_over: f64,
+    eps: f64,
+    label: &str,
+) {
+    assert_eq!(entry.observed, observed, "{label}: observed");
+    assert!(
+        (entry.null_mean - null_mean).abs() < eps,
+        "{label}: null_mean got {} expected {null_mean}",
+        entry.null_mean
+    );
+    assert!(
+        (entry.null_std - null_std).abs() < eps,
+        "{label}: null_std got {} expected {null_std}",
+        entry.null_std
+    );
+    if z_score.is_infinite() {
+        assert_eq!(
+            entry.z_score.is_sign_positive(),
+            z_score.is_sign_positive(),
+            "{label}: z_score sign"
+        );
+        assert!(
+            entry.z_score.is_infinite(),
+            "{label}: z_score must be infinite"
+        );
+    } else {
+        assert!(
+            (entry.z_score - z_score).abs() < eps,
+            "{label}: z_score got {} expected {z_score}",
+            entry.z_score
+        );
+    }
+    assert!(
+        (entry.p_value_over - p_value_over).abs() < eps,
+        "{label}: p_value_over got {} expected {p_value_over}",
+        entry.p_value_over
+    );
+}
+
+#[test]
+fn sig_mechanics_hand_computed() {
+    let eps = 1e-12_f64;
+
+    // Case 1: mixed null, observed = mean.
+    // null = [3,5,5,7], observed = 5
+    // mean = 5.0, var = (4+0+0+4)/4 = 2.0, std = sqrt(2)
+    // z = (5-5)/sqrt(2) = 0.0
+    // p_over = |{c: c>=5}| / 4 = 3/4 = 0.75  (counts: 5, 5, 7)
+    {
+        let nulls: Vec<u64> = vec![3, 5, 5, 7];
+        let e = compute_significance_stats(5, &nulls);
+        let sqrt2 = 2.0_f64.sqrt();
+        assert_sig_entry(&e, 5, 5.0, sqrt2, 0.0, 0.75, eps, "case1");
+    }
+
+    // Case 2: observed above mean.
+    // null = [3,5,5,7], observed = 8
+    // mean=5, std=sqrt(2), z=(8-5)/sqrt(2)=3/sqrt(2)≈2.121...
+    // p_over = |{c: c>=8}| / 4 = 0/4 = 0.0
+    {
+        let nulls: Vec<u64> = vec![3, 5, 5, 7];
+        let e = compute_significance_stats(8, &nulls);
+        let sqrt2 = 2.0_f64.sqrt();
+        let z = 3.0 / sqrt2;
+        assert_sig_entry(&e, 8, 5.0, sqrt2, z, 0.0, eps, "case2");
+    }
+
+    // Case 3: std == 0, observed == null_mean → z = 0.
+    // null = [3,3,3,3], observed = 3
+    // mean = 3, std = 0, z = 0 (guard), p_over = 4/4 = 1.0
+    {
+        let nulls: Vec<u64> = vec![3, 3, 3, 3];
+        let e = compute_significance_stats(3, &nulls);
+        assert_sig_entry(&e, 3, 3.0, 0.0, 0.0, 1.0, eps, "case3-z0");
+    }
+
+    // Case 4: std == 0, observed > null_mean → z = +∞.
+    // null = [3,3,3,3], observed = 5
+    // p_over = |{c: c>=5}| / 4 = 0/4 = 0.0
+    {
+        let nulls: Vec<u64> = vec![3, 3, 3, 3];
+        let e = compute_significance_stats(5, &nulls);
+        assert_sig_entry(&e, 5, 3.0, 0.0, f64::INFINITY, 0.0, eps, "case4-z+inf");
+    }
+
+    // Case 5: std == 0, observed < null_mean → z = −∞.
+    // null = [3,3,3,3], observed = 2
+    // p_over = |{c: c>=2}| / 4 = 4/4 = 1.0 (all null counts 3 >= 2)
+    {
+        let nulls: Vec<u64> = vec![3, 3, 3, 3];
+        let e = compute_significance_stats(2, &nulls);
+        assert!(
+            e.z_score.is_infinite() && e.z_score.is_sign_negative(),
+            "case5: z=-inf"
+        );
+        assert!((e.p_value_over - 1.0).abs() < eps, "case5: p_over=1");
+    }
+
+    // Case 6: single-element ensemble.
+    // null = [7], observed = 7: mean=7, std=0, z=0, p_over=1.0
+    {
+        let e = compute_significance_stats(7, &[7]);
+        assert_sig_entry(&e, 7, 7.0, 0.0, 0.0, 1.0, eps, "case6-single");
+    }
+
+    // Case 7: single-element ensemble, observed < null.
+    // null = [7], observed = 0: mean=7, std=0, z=-∞, p_over=1.0 (7>=0)
+    {
+        let e = compute_significance_stats(0, &[7]);
+        assert!(
+            e.z_score.is_infinite() && e.z_score.is_sign_negative(),
+            "case7: z=-inf"
+        );
+        assert!((e.p_value_over - 1.0).abs() < eps, "case7: p_over=1");
+    }
+
+    // Case 8: p_value_over tie convention — observed=5, null=[3,5,7,5].
+    // Counts >= 5: 5, 7, 5 → 3 of 4 → p_over = 0.75
+    {
+        let nulls: Vec<u64> = vec![3, 5, 7, 5];
+        let e = compute_significance_stats(5, &nulls);
+        assert!((e.p_value_over - 0.75).abs() < eps, "case8: tie p_over");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [S2] Planted signal: over-represented triangles, under-represented P3.
+//
+// Graph: 5 disjoint triangles (15 nodes, 15 edges).  Every node has degree 2.
+// The degree-preserving null is a random 2-regular graph (union of cycles).
+// Triangles (induced K_3) are over-represented in the original vs the null
+// (which tends to form longer cycles). Induced P3s (path of 3 where the two
+// endpoints are NOT connected) are 0 in the original (each component is K_3,
+// so every triple is a triangle) but numerous in the null (every 3 consecutive
+// nodes in a longer cycle form an induced P3).
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_planted_triangles_over_represented() {
+    // Five disjoint triangles.
+    let g: UnGraph<(), ()> = build_un(
+        &[
+            (0, 1),
+            (1, 2),
+            (2, 0),
+            (3, 4),
+            (4, 5),
+            (5, 3),
+            (6, 7),
+            (7, 8),
+            (8, 6),
+            (9, 10),
+            (10, 11),
+            (11, 9),
+            (12, 13),
+            (13, 14),
+            (14, 12),
+        ],
+        15,
+    );
+
+    let tri = Pattern::triangle();
+    let p3 = Pattern::path(3);
+
+    let mut rng = StdRng::seed_from_u64(42);
+    let results = motif_significance(
+        &g,
+        &[("triangle", &tri, Induced::Yes), ("p3", &p3, Induced::Yes)],
+        100,
+        NullModel::DegreePreserving {
+            n_swaps_per_edge: 10,
+        },
+        &mut rng,
+    );
+
+    assert_eq!(results.len(), 2);
+    let tri_entry = &results[0].1;
+    let p3_entry = &results[1].1;
+
+    // Observed counts are exact (structure is deterministic).
+    assert_eq!(tri_entry.observed, 5, "5 disjoint triangles");
+    assert_eq!(
+        p3_entry.observed, 0,
+        "no induced P3 in K_3 components (every triple is a triangle)"
+    );
+
+    // Triangle z-score must be large positive: over-represented vs the null
+    // (which breaks triangles into longer cycles).
+    assert!(
+        tri_entry.z_score > 2.0,
+        "triangle z-score should be large positive, got {}",
+        tri_entry.z_score
+    );
+
+    // P3 z-score must be negative: 0 observed, but null (longer cycles) has
+    // many induced P3s.
+    assert!(
+        p3_entry.z_score < 0.0,
+        "P3 z-score should be negative (under-represented), got {}",
+        p3_entry.z_score
+    );
+
+    // Triangle z-score strictly dominates P3 z-score.
+    assert!(
+        tri_entry.z_score > p3_entry.z_score,
+        "triangle z-score ({}) should exceed P3 z-score ({})",
+        tri_entry.z_score,
+        p3_entry.z_score
+    );
+
+    // P-values in [0,1].
+    assert!((0.0..=1.0).contains(&tri_entry.p_value_over));
+    assert!((0.0..=1.0).contains(&p3_entry.p_value_over));
+}
+
+// ---------------------------------------------------------------------------
+// [S3] Planted signal via configuration-model null (alternative null model).
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_planted_triangles_config_model_null() {
+    // A graph with many triangles: two overlapping K_5s sharing one edge.
+    // 0-4 complete + 3-7 complete sharing edge 3-4 (9 nodes total).
+    let mut edges = complete_edges(5); // K_5 on 0-4
+                                       // K_5 on nodes 3-7 (index 3,4,5,6,7).
+    for i in 3..8usize {
+        for j in (i + 1)..8 {
+            edges.push((i, j));
+        }
+    }
+    let g = build_un(&edges, 8);
+    let tri = Pattern::triangle();
+    let mut rng = StdRng::seed_from_u64(99);
+    let results = motif_significance(
+        &g,
+        &[("triangle", &tri, Induced::Yes)],
+        80,
+        NullModel::ConfigurationModel,
+        &mut rng,
+    );
+    let entry = &results[0].1;
+    assert!(entry.observed > 0, "two overlapping K5s have triangles");
+    // Z-score should be positive: the clique structure contains more triangles
+    // than a random configuration-model graph with the same degree sequence.
+    assert!(
+        entry.z_score >= 0.0 || entry.null_std == 0.0,
+        "triangle z-score should be non-negative for clique vs config null, got {}",
+        entry.z_score
+    );
+    assert!((0.0..=1.0).contains(&entry.p_value_over));
+}
+
+// ---------------------------------------------------------------------------
+// [S4] Determinism: same seed produces identical results.
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_determinism_same_seed() {
+    let g: UnGraph<(), ()> = build_un(&random_edges(20, 0.3, 7), 20);
+    let tri = Pattern::triangle();
+
+    let run = |seed: u64| {
+        let mut rng = StdRng::seed_from_u64(seed);
+        motif_significance(
+            &g,
+            &[("triangle", &tri, Induced::Yes)],
+            50,
+            NullModel::DegreePreserving {
+                n_swaps_per_edge: 10,
+            },
+            &mut rng,
+        )
+    };
+
+    let r1 = run(123);
+    let r2 = run(123);
+    let r3 = run(456); // different seed → different null ensemble
+
+    assert_eq!(
+        r1[0].1.null_mean, r2[0].1.null_mean,
+        "same seed → same mean"
+    );
+    assert_eq!(r1[0].1.null_std, r2[0].1.null_std, "same seed → same std");
+    assert_eq!(r1[0].1.z_score, r2[0].1.z_score, "same seed → same z-score");
+    assert_eq!(
+        r1[0].1.p_value_over, r2[0].1.p_value_over,
+        "same seed → same p-value"
+    );
+
+    // Observed is always the same (deterministic count on fixed graph).
+    assert_eq!(
+        r1[0].1.observed, r3[0].1.observed,
+        "observed independent of seed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [S5] census_significance_profile: basic structure checks.
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_census_profile_structure() {
+    use crate::canonical::all_connected_classes;
+
+    let g: UnGraph<(), ()> = build_un(&random_edges(15, 0.4, 5), 15);
+    let mut rng = StdRng::seed_from_u64(77);
+    let profile = census_significance_profile(
+        &g,
+        3,
+        50,
+        NullModel::DegreePreserving {
+            n_swaps_per_edge: 10,
+        },
+        &mut rng,
+        false,
+    );
+
+    // For k=3 there are exactly 2 connected classes (P3 and K3).
+    assert_eq!(profile.entries.len(), 2, "k=3 has exactly 2 classes");
+    assert_eq!(profile.z_scores.len(), 2);
+    assert!(profile.normalized.is_none());
+
+    // ClassIds match ground truth, sorted ascending.
+    let gt: Vec<u64> = {
+        let mut v = all_connected_classes(3);
+        v.sort_unstable();
+        v
+    };
+    for (i, (cid, _)) in profile.entries.iter().enumerate() {
+        assert_eq!(cid.0, gt[i], "class id at position {i}");
+    }
+
+    // Z-scores are not NaN.
+    for z in &profile.z_scores {
+        assert!(!z.is_nan(), "z-score must not be NaN");
+    }
+
+    // P-values in [0,1].
+    for (_, e) in &profile.entries {
+        assert!((0.0..=1.0).contains(&e.p_value_over));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [S6] census_significance_profile: normalization produces unit length.
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_census_profile_normalization_unit_length() {
+    let g: UnGraph<(), ()> = build_un(&random_edges(18, 0.35, 88), 18);
+    let mut rng = StdRng::seed_from_u64(55);
+    let profile = census_significance_profile(
+        &g,
+        3,
+        60,
+        NullModel::DegreePreserving {
+            n_swaps_per_edge: 10,
+        },
+        &mut rng,
+        true,
+    );
+    let norm_vec = profile.normalized.as_ref().expect("normalized requested");
+    assert_eq!(norm_vec.len(), profile.z_scores.len());
+    // Euclidean norm of normalized vector must be 1 (or 0 if z-scores are all 0).
+    let norm_sq: f64 = norm_vec
+        .iter()
+        .filter(|z| z.is_finite())
+        .map(|&z| z * z)
+        .sum();
+    let norm = norm_sq.sqrt();
+    let z_all_zero = profile.z_scores.iter().all(|&z| z == 0.0);
+    if z_all_zero {
+        assert_eq!(norm, 0.0, "all-zero z-scores → zero normalized vector");
+    } else {
+        assert!(
+            (norm - 1.0).abs() < 1e-10,
+            "normalized z-score vector must have unit length, got norm={norm}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [S7] Near-zero z-scores for a graph drawn from the null itself.
+//
+// A graph produced by heavy degree-preserving randomization of a base graph has
+// structure consistent with the null model, so its z-scores (against further
+// samples from the same null) should be near zero on average.
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_near_zero_for_null_graph() {
+    // Start with a 30-node graph with average degree ≈ 6, randomize heavily.
+    let base: UnGraph<(), ()> = build_un(&random_edges(30, 0.2, 11), 30);
+    // Apply 2000 swaps to produce a "null graph": structure is consistent with
+    // the degree-preserving null.
+    let mut rng_prep = StdRng::seed_from_u64(314);
+    let null_graph = double_edge_swap(&base, 2000, &mut rng_prep);
+
+    // Now test significance of `null_graph` against the same null (more swaps
+    // from the same base). Z-scores should be near 0.
+    let mut rng = StdRng::seed_from_u64(999);
+    let profile = census_significance_profile(
+        &null_graph,
+        3,
+        200,
+        NullModel::DegreePreserving {
+            n_swaps_per_edge: 10,
+        },
+        &mut rng,
+        false,
+    );
+
+    // With 200 samples and a well-mixed starting point, |z| < 4.0 is a very
+    // conservative bound (3σ for a single standard normal sample with N=200
+    // ensemble is ≈ 0.21). This test is deterministic (fixed seed).
+    for (i, &z) in profile.z_scores.iter().enumerate() {
+        if z.is_finite() {
+            assert!(
+                z.abs() < 4.0,
+                "k=3 class[{i}] z-score={z:.3} should be near 0 for a null-graph sample"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proptest: p-values in [0,1], z-scores not NaN, observed in range of nulls.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(80))]
+
+    /// p_value_over ∈ [0,1] and z_score is not NaN for all graphs and both
+    /// null models. Covers the triangle pattern across random small graphs.
+    #[test]
+    fn prop_significance_valid_stats((n, bits, seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let tri = Pattern::triangle();
+        let p3  = Pattern::path(3);
+
+        for model in [
+            NullModel::DegreePreserving { n_swaps_per_edge: 5 },
+            NullModel::ConfigurationModel,
+        ] {
+            let mut rng = StdRng::seed_from_u64(seed);
+            if n < 3 {
+                // Just assert the function runs without panic on tiny graphs.
+                let _ = motif_significance(
+                    &g,
+                    &[("tri", &tri, Induced::Yes)],
+                    5,
+                    model,
+                    &mut rng,
+                );
+                continue;
+            }
+            let results = motif_significance(
+                &g,
+                &[
+                    ("tri", &tri, Induced::Yes),
+                    ("p3",  &p3,  Induced::Yes),
+                ],
+                10,
+                model,
+                &mut rng,
+            );
+            for (_name, entry) in &results {
+                prop_assert!(!entry.z_score.is_nan(), "z_score must not be NaN");
+                prop_assert!(
+                    (0.0..=1.0).contains(&entry.p_value_over),
+                    "p_value_over={} out of [0,1]", entry.p_value_over
+                );
+                prop_assert!(
+                    entry.null_std >= 0.0,
+                    "null_std must be non-negative, got {}", entry.null_std
+                );
+            }
+        }
+    }
+
+    /// census_significance_profile: z-scores not NaN, p-values in [0,1],
+    /// normalized vector (when requested) has unit length or is all-zero.
+    #[test]
+    fn prop_census_profile_valid((n, bits, seed) in graph_strategy()) {
+        if n < 3 {
+            return Ok(());
+        }
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let profile = census_significance_profile(
+            &g,
+            3,
+            10,
+            NullModel::DegreePreserving { n_swaps_per_edge: 5 },
+            &mut rng,
+            true,
+        );
+
+        for &z in &profile.z_scores {
+            prop_assert!(!z.is_nan(), "z-score must not be NaN");
+        }
+        for (_, e) in &profile.entries {
+            prop_assert!(
+                (0.0..=1.0).contains(&e.p_value_over),
+                "p_value_over out of [0,1]"
+            );
+        }
+        // Normalized vector has unit length (or is zero if z-scores are all zero).
+        if let Some(nv) = &profile.normalized {
+            let norm_sq: f64 = nv.iter().filter(|z| z.is_finite()).map(|&z| z * z).sum();
+            let norm = norm_sq.sqrt();
+            let z_zero = profile.z_scores.iter().all(|&z| z == 0.0 || z.is_infinite());
+            if !z_zero {
+                prop_assert!(
+                    (norm - 1.0).abs() < 1e-9 || norm == 0.0,
+                    "normalized vector norm={norm} should be 1 or 0"
+                );
+            }
+        }
+    }
+}

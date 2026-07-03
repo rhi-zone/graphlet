@@ -22,9 +22,11 @@ pub mod kernels {}
 
 /// Motif significance: z-scores and empirical p-values against a null model.
 ///
-/// TODO (ADR-0290): compare an observed census / GDV against an ensemble from
-/// [`null_model`] to score over- and under-representation.
-pub mod significance {}
+/// Compares an observed census / motif count against an ensemble from
+/// [`null_model`] to score over- and under-representation per target class
+/// (ADR-0290). See [`significance::motif_significance`] and
+/// [`significance::census_significance_profile`].
+pub mod significance;
 
 /// Neighborhood statistics — a sibling module *outside* the census substrate.
 ///
