@@ -44,20 +44,21 @@ pub mod neighborhood;
 
 /// Scalable graphlet counting beyond naive per-subset canonicalization.
 ///
-/// Implemented (ADR-0290, phase 6, partial close): an ORCA-style (Hočevar & Demšar
-/// 2014) fast per-node orbit counter for graphlets of order `2..=4` (orbits `0..=14`)
-/// — count degree, per-edge triangle, and per-vertex K4 quantities once, then solve a
-/// small per-vertex linear system, instead of enumerating every connected 4-subset.
-/// Verified exact against the census substrate's own `graphlet_degree_vectors` /
-/// `count`, node-for-node and count-for-count, across a large battery plus a
-/// proptest. See [`scalable::fast_graphlet_degree_vectors`] and
+/// Implemented (ADR-0290, phases 6 + 8): an ORCA-style (Hočevar & Demšar 2014) fast
+/// per-node orbit counter over **all 73 orbits** (graphlets of order `2..=5`),
+/// clean-room from the published mathematics. Orders `2..=4` (orbits `0..=14`) come
+/// from directly counting degree, per-edge triangle, and per-vertex K4 quantities and
+/// solving a small per-vertex linear system; the 58 order-5 orbits (`15..=72`) come
+/// from enumerating connected *4*-subset seeds and tallying each outside vertex's
+/// induced attachment, decoded by a table built from the crate's own canonical/registry
+/// machinery and closed by an exact per-orbit multiplicity division — so no connected
+/// 5-subset is ever canonically labelled. Verified exact against the census substrate's
+/// own `graphlet_degree_vectors` / `count`, node-for-node and count-for-count, across a
+/// large battery (paths, cycles, stars, complete graphs, wheels, trees, complete
+/// bipartite, Petersen, cube Q3) plus fuzzed random graphs and a proptest; on
+/// larger/denser graphs it runs roughly two orders of magnitude faster than the exact
+/// k=5 census. See [`scalable::fast_graphlet_degree_vectors`] and
 /// [`scalable::fast_count`].
-///
-/// **Still open (not this phase):** the full order-5 system (58 more orbits) is a
-/// much larger equation set; completing it faithfully and verifiably was out of scope
-/// here, so k = 5 fast counting is not yet implemented — use the exact
-/// `graphlet_degree_vectors` / `count` for k = 5 in the meantime. See the module docs
-/// for the exact boundary.
 pub mod scalable;
 
 /// Directed motif analysis: triad census (k=3, all 16 types) and directed graphlet

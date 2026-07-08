@@ -76,9 +76,19 @@ impl Registry {
     }
 
     /// Global orbit id per canonical slot for a `(order, class-mask)`.
+    ///
+    /// The slice is indexed by canonical slot `c` (`0..k`); entry `c` is the global
+    /// orbit id of that slot. Used by the scalable fast path to attribute a directly
+    /// reconstructed graphlet's nodes to the same global orbit ids the exact path
+    /// would, without re-deriving the numbering.
+    pub(crate) fn slot_ids(&self, k: usize, class: u64) -> &[usize] {
+        &self.slot_global[&(k, class)]
+    }
+
+    /// Global orbit id per canonical slot for a `(order, class-mask)`.
     #[cfg(test)]
     pub(crate) fn slot_map(&self, k: usize, class: u64) -> &[usize] {
-        &self.slot_global[&(k, class)]
+        self.slot_ids(k, class)
     }
 }
 
