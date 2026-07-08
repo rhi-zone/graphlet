@@ -60,8 +60,19 @@ pub mod neighborhood;
 /// for the exact boundary.
 pub mod scalable;
 
-/// Directed motif analysis at k ≥ 4.
+/// Directed motif analysis: triad census (k=3, all 16 types) and directed graphlet
+/// census / orbits (weakly-connected, k in `2..=4`).
 ///
-/// TODO (ADR-0290, deferred by design): the census core is undirected at k ≥ 4 (k=3
-/// triads are settled). Directed graphlet classes/orbits at k ≥ 4 are future work.
-pub mod directed {}
+/// Implemented (ADR-0290, phase 7): the standard 16-type Holland–Leinhardt directed
+/// triad census, and a directed generalization of the census/orbit substrate — ordered
+/// (directed) canonical labelling, weak-connectivity-restricted enumeration, and a
+/// directed-automorphism orbit registry — at orders `2..=4`. Verified exact against an
+/// independent brute-force directed oracle (triad classification decorrelated from the
+/// canonical-mask machinery; k=4 classes/orbits decorrelated from the ESU-driven
+/// production path) on adversarial (cycles, DAGs, tournaments, bidirectional-edge
+/// graphs) and fuzzed random digraphs, plus a proptest.
+///
+/// **Still open (not this phase):** directed k = 5 (orbits and classes) is not
+/// implemented — see [`directed`]'s module docs for the exact boundary and the
+/// undirected fallback.
+pub mod directed;
