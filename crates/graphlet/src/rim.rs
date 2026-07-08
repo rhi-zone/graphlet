@@ -15,10 +15,14 @@ pub mod null_model;
 
 /// Structure-aware graph kernels.
 ///
-/// TODO (ADR-0290): the graphlet kernel reduces to census vectors and belongs here;
-/// Weisfeiler–Lehman and shortest-path kernels are siblings. The WL hash core is
-/// **not** to be rebuilt (NIH-corrected — observe/use `wl_isomorphism`).
-pub mod kernels {}
+/// Implemented (ADR-0290, phase 5): a graphlet kernel that reduces to the census
+/// substrate's own class-count vectors (no reimplementation of graphlet counting),
+/// a Weisfeiler–Lehman subtree kernel (label refinement, shared cross-graph
+/// alphabet), a shortest-path kernel (BFS distance histograms), and a generic
+/// Gram-matrix builder with optional cosine normalization. See
+/// [`kernels::graphlet_kernel`], [`kernels::wl_kernel`],
+/// [`kernels::shortest_path_kernel`], and [`kernels::gram_matrix`].
+pub mod kernels;
 
 /// Motif significance: z-scores and empirical p-values against a null model.
 ///

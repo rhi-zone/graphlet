@@ -3335,3 +3335,450 @@ proptest! {
         }
     }
 }
+
+// ===========================================================================
+// PHASE-5: GRAPH KERNELS
+// ===========================================================================
+
+use crate::rim::kernels::{
+    degree_labeling, gram_matrix, graphlet_features, graphlet_gram_matrix, graphlet_kernel,
+    graphlet_kernel_cosine, label_histogram, shortest_path_gram_matrix, shortest_path_histogram,
+    shortest_path_kernel, wl_gram_matrix, wl_kernel, wl_kernel_pair, wl_refine, GramNormalization,
+};
+
+// ---------------------------------------------------------------------------
+// [K1] Graphlet kernel: feature vector literally equals the census output.
+// ---------------------------------------------------------------------------
+#[test]
+fn graphlet_features_matches_census_directly() {
+    // Diamond (K4 minus one edge) plus a pendant vertex — the lib.rs doctest graph.
+    let g = build_un(&[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (3, 4)], 5);
+    for k in 2..=4usize {
+        let sel = Selector::connected_k_subsets(k);
+        let census = count(&g, &sel);
+        let features = graphlet_features(&g, k);
+        assert_eq!(
+            features, census,
+            "graphlet_features must equal census at k={k}"
+        );
+    }
+    // Cross-check the k=3 total against the known hand-count (6) from lib.rs.
+    let k3 = graphlet_features(&g, 3);
+    assert_eq!(k3.values().sum::<u64>(), 6);
+}
+
+// ---------------------------------------------------------------------------
+// [K2] Graphlet kernel: triangle vs P3 share no k=3 class (hand-checked disjoint
+// classes), triangle vs triangle is a perfect cosine match.
+// ---------------------------------------------------------------------------
+#[test]
+fn graphlet_kernel_hand_triangle_vs_path() {
+    let triangle = build_un(&[(0, 1), (1, 2), (2, 0)], 3);
+    let path = build_un(&[(0, 1), (1, 2)], 3);
+
+    let ft = graphlet_features(&triangle, 3);
+    let fp = graphlet_features(&path, 3);
+
+    // Hand check: exactly one instance of each single class.
+    assert_eq!(ft.values().sum::<u64>(), 1);
+    assert_eq!(fp.values().sum::<u64>(), 1);
+    let tri_class = Pattern::triangle().class_id();
+    let path_class = Pattern::path(3).class_id();
+    assert_ne!(
+        tri_class, path_class,
+        "triangle and P3 must be distinct classes"
+    );
+    assert_eq!(ft.get(&tri_class).copied(), Some(1));
+    assert_eq!(fp.get(&path_class).copied(), Some(1));
+
+    // Disjoint classes -> zero kernel value both raw and cosine.
+    assert_eq!(graphlet_kernel(&ft, &fp), 0);
+    assert_eq!(graphlet_kernel_cosine(&ft, &fp), 0.0);
+
+    // Self-kernel is always maximal under cosine normalization.
+    assert!((graphlet_kernel_cosine(&ft, &ft) - 1.0).abs() < 1e-12);
+    assert!((graphlet_kernel_cosine(&fp, &fp) - 1.0).abs() < 1e-12);
+
+    // Symmetry.
+    assert_eq!(graphlet_kernel(&ft, &fp), graphlet_kernel(&fp, &ft));
+}
+
+// ---------------------------------------------------------------------------
+// [K3] Graphlet kernel: isomorphism invariance under relabelling.
+// ---------------------------------------------------------------------------
+#[test]
+fn graphlet_kernel_isomorphism_invariant() {
+    let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (3, 4)];
+    let g = build_un(&edges, 5);
+    let order = [4, 2, 0, 3, 1]; // logical -> insertion order
+    let gp = build_perm_un(&edges, 5, &order);
+
+    for k in 2..=4usize {
+        let fg = graphlet_features(&g, k);
+        let fgp = graphlet_features(&gp, k);
+        assert_eq!(
+            fg, fgp,
+            "graphlet feature vector must be relabelling-invariant at k={k}"
+        );
+        assert_eq!(graphlet_kernel(&fg, &fg), graphlet_kernel(&fg, &fgp));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [K4] WL subtree kernel: hand-computed labels/histograms on P4 (path 0-1-2-3).
+//
+// By hand: degrees = [1,2,2,1] (iter 0). Iteration 1 signatures:
+//   v0: (1, [2])       v1: (2, [1,2])
+//   v2: (2, [1,2])     v3: (1, [2])
+// so v0≡v3 and v1≡v2 (encountered in node order 0..3, so v0/v3 share the first
+// id minted and v1/v2 share the second) — histogram {id0: 2, id1: 2}.
+// Iteration 2 repeats the same symmetric split (v0≡v3, v1≡v2 again, from
+// signatures (0,[1]) vs (1,[0,1])) — histogram {id0: 2, id1: 2} again.
+// ---------------------------------------------------------------------------
+#[test]
+fn wl_hand_p4_labels_and_histograms() {
+    let g = build_un(&path_edges(4), 4);
+    let initial = degree_labeling(&g);
+    assert_eq!(initial, vec![1, 2, 2, 1], "P4 degrees");
+
+    let history = wl_refine(&[&g], &[initial], 2);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].len(), 3); // iterations 0, 1, 2
+
+    // Iteration 0: histogram of degrees {1:2, 2:2}.
+    let h0 = label_histogram(&history[0][0]);
+    let mut v0: Vec<u64> = h0.values().copied().collect();
+    v0.sort_unstable();
+    assert_eq!(v0, vec![2, 2]);
+
+    // Iteration 1: v0 == v3, v1 == v2, and the two groups differ.
+    let l1 = &history[0][1];
+    assert_eq!(l1[0], l1[3], "iter1: node0 and node3 must share a label");
+    assert_eq!(l1[1], l1[2], "iter1: node1 and node2 must share a label");
+    assert_ne!(l1[0], l1[1], "iter1: the two groups must differ");
+    let mut v1: Vec<u64> = label_histogram(l1).values().copied().collect();
+    v1.sort_unstable();
+    assert_eq!(v1, vec![2, 2]);
+
+    // Iteration 2: same symmetric split persists.
+    let l2 = &history[0][2];
+    assert_eq!(l2[0], l2[3], "iter2: node0 and node3 must share a label");
+    assert_eq!(l2[1], l2[2], "iter2: node1 and node2 must share a label");
+    assert_ne!(l2[0], l2[1], "iter2: the two groups must differ");
+    let mut v2: Vec<u64> = label_histogram(l2).values().copied().collect();
+    v2.sort_unstable();
+    assert_eq!(v2, vec![2, 2]);
+}
+
+// ---------------------------------------------------------------------------
+// [K5] WL subtree kernel: symmetry, self-kernel positivity, isomorphism
+// invariance under relabelling.
+// ---------------------------------------------------------------------------
+#[test]
+fn wl_kernel_symmetry_and_self_positive() {
+    let g = build_un(&[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4); // diamond
+    let h = build_un(&path_edges(5), 5);
+    let kgh = wl_kernel_pair(&g, &h, 3);
+    let khg = wl_kernel_pair(&h, &g, 3);
+    assert_eq!(kgh, khg, "WL kernel must be symmetric");
+    assert!(
+        wl_kernel_pair(&g, &g, 3) > 0,
+        "self-kernel must be positive for a nonempty graph"
+    );
+
+    // Exercise the lower-level primitives directly (wl_refine + wl_kernel), and
+    // the generic gram_matrix over the resulting per-graph iteration histories.
+    let initial = vec![degree_labeling(&g), degree_labeling(&h)];
+    let history = wl_refine(&[&g, &h], &initial, 3);
+    assert_eq!(wl_kernel(&history[0], &history[1]), kgh);
+    let gm = gram_matrix(
+        &history,
+        |a, b| wl_kernel(a, b) as f64,
+        GramNormalization::Raw,
+    );
+    assert_eq!(gm[0][1], kgh as f64);
+    assert_eq!(gm[0][0], wl_kernel(&history[0], &history[0]) as f64);
+}
+
+#[test]
+fn wl_kernel_isomorphism_invariant() {
+    let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]; // diamond, 4 nodes
+    let g = build_un(&edges, 4);
+    let order = [3, 1, 0, 2];
+    let gp = build_perm_un(&edges, 4, &order);
+    for h in 0..=3usize {
+        assert_eq!(
+            wl_kernel_pair(&g, &g, h),
+            wl_kernel_pair(&g, &gp, h),
+            "WL kernel(g,g) must equal kernel(g, relabelled g) at h={h}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [K6] Shortest-path kernel: hand-computed distance histograms for P4, C4, K4.
+// ---------------------------------------------------------------------------
+#[test]
+fn sp_hand_histograms_p4_c4_k4() {
+    // P4 (path on 4 nodes): distances 1,1,1 (adjacent pairs) / 2,2 / 3.
+    let p4 = build_un(&path_edges(4), 4);
+    let hp4 = shortest_path_histogram(&p4);
+    assert_eq!(hp4.get(&1).copied(), Some(3));
+    assert_eq!(hp4.get(&2).copied(), Some(2));
+    assert_eq!(hp4.get(&3).copied(), Some(1));
+    assert_eq!(hp4.values().sum::<u64>(), 6); // C(4,2)
+
+    // C4 (4-cycle): 4 pairs at distance 1, 2 pairs (the diagonals) at distance 2.
+    let c4 = build_un(&cycle_edges(4), 4);
+    let hc4 = shortest_path_histogram(&c4);
+    assert_eq!(hc4.get(&1).copied(), Some(4));
+    assert_eq!(hc4.get(&2).copied(), Some(2));
+    assert_eq!(
+        hc4.len(),
+        2,
+        "C4 histogram has exactly two distance buckets"
+    );
+    assert_eq!(hc4.values().sum::<u64>(), 6);
+
+    // K4 (complete graph on 4 nodes): every pair is adjacent, so all 6 pairs at
+    // distance 1.
+    let k4 = build_un(&complete_edges(4), 4);
+    let hk4 = shortest_path_histogram(&k4);
+    assert_eq!(hk4.get(&1).copied(), Some(6));
+    assert_eq!(hk4.len(), 1, "K4 histogram has exactly one distance bucket");
+}
+
+// ---------------------------------------------------------------------------
+// [K7] Shortest-path kernel: symmetry and isomorphism invariance.
+// ---------------------------------------------------------------------------
+#[test]
+fn sp_kernel_symmetry_and_isomorphism_invariant() {
+    let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)]; // diamond
+    let g = build_un(&edges, 4);
+    let h = build_un(&cycle_edges(5), 5);
+
+    let hg = shortest_path_histogram(&g);
+    let hh = shortest_path_histogram(&h);
+    assert_eq!(
+        shortest_path_kernel(&hg, &hh),
+        shortest_path_kernel(&hh, &hg),
+        "SP kernel must be symmetric"
+    );
+
+    let order = [3, 1, 0, 2];
+    let gp = build_perm_un(&edges, 4, &order);
+    let hgp = shortest_path_histogram(&gp);
+    assert_eq!(hg, hgp, "SP histogram must be relabelling-invariant");
+    assert_eq!(
+        shortest_path_kernel(&hg, &hg),
+        shortest_path_kernel(&hg, &hgp)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [K8] Gram matrix: cosine normalization gives a unit diagonal (nonzero
+// self-kernels), and Raw mode reproduces the plain pairwise kernel values.
+// ---------------------------------------------------------------------------
+#[test]
+fn gram_matrix_cosine_unit_diagonal() {
+    let graphs: Vec<UnGraph<(), ()>> = vec![
+        build_un(&complete_edges(3), 3),
+        build_un(&path_edges(4), 4),
+        build_un(&cycle_edges(4), 4),
+        build_un(&star_edges(5), 5),
+        build_un(&[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4), // diamond
+    ];
+    let refs: Vec<&UnGraph<(), ()>> = graphs.iter().collect();
+
+    let raw = graphlet_gram_matrix(&refs, 3, GramNormalization::Raw);
+    let cos = graphlet_gram_matrix(&refs, 3, GramNormalization::Cosine);
+    for (i, cos_row) in cos.iter().enumerate() {
+        assert!(
+            (cos_row[i] - 1.0).abs() < 1e-9,
+            "cosine diag[{i}] = {}",
+            cos_row[i]
+        );
+    }
+    // Symmetry of the raw matrix.
+    for i in 0..graphs.len() {
+        for j in 0..graphs.len() {
+            assert!(
+                (raw[i][j] - raw[j][i]).abs() < 1e-9,
+                "raw gram matrix not symmetric at ({i},{j})"
+            );
+            assert!(
+                (cos[i][j] - cos[j][i]).abs() < 1e-9,
+                "cosine gram matrix not symmetric at ({i},{j})"
+            );
+        }
+    }
+
+    // WL and SP gram matrices: same unit-diagonal + symmetry checks.
+    let wl_cos = wl_gram_matrix(&refs, 2, GramNormalization::Cosine);
+    let sp_cos = shortest_path_gram_matrix(&refs, GramNormalization::Cosine);
+    for i in 0..graphs.len() {
+        assert!((wl_cos[i][i] - 1.0).abs() < 1e-9, "WL cosine diag[{i}]");
+        assert!((sp_cos[i][i] - 1.0).abs() < 1e-9, "SP cosine diag[{i}]");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [K9] Positive semi-definiteness of the Gram matrix via Cholesky (test-only
+// helper — no new dependency). This is the mathematically defining property of
+// a valid kernel.
+// ---------------------------------------------------------------------------
+
+/// Attempt a Cholesky decomposition of a symmetric matrix; returns whether it
+/// succeeds within `eps` tolerance (a small negative pivot within `eps` of zero is
+/// treated as a numerical zero, not a PSD violation).
+fn is_psd_via_cholesky(m: &[Vec<f64>], eps: f64) -> bool {
+    let n = m.len();
+    let mut l = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = m[i][j];
+            for (li, lj) in l[i].iter().zip(l[j].iter()).take(j) {
+                sum -= li * lj;
+            }
+            if i == j {
+                if sum < -eps {
+                    return false;
+                }
+                l[i][j] = sum.max(0.0).sqrt();
+            } else if l[j][j] > eps {
+                l[i][j] = sum / l[j][j];
+            } else if sum.abs() > eps {
+                // Zero pivot but nonzero off-diagonal residual: not PSD within tolerance.
+                return false;
+            } else {
+                l[i][j] = 0.0;
+            }
+        }
+    }
+    true
+}
+
+#[test]
+fn gram_matrices_are_psd_fixed_battery() {
+    let graphs: Vec<UnGraph<(), ()>> = vec![
+        build_un(&complete_edges(3), 3),
+        build_un(&complete_edges(4), 4),
+        build_un(&path_edges(4), 4),
+        build_un(&path_edges(6), 6),
+        build_un(&cycle_edges(4), 4),
+        build_un(&cycle_edges(6), 6),
+        build_un(&star_edges(5), 5),
+        build_un(&[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4), // diamond
+        build_un(&[(0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (3, 4)], 5), // diamond+pendant
+        build_un(&random_edges(8, 0.4, 7), 8),
+    ];
+    let refs: Vec<&UnGraph<(), ()>> = graphs.iter().collect();
+
+    let g_raw = graphlet_gram_matrix(&refs, 3, GramNormalization::Raw);
+    assert!(
+        is_psd_via_cholesky(&g_raw, 1e-6),
+        "graphlet kernel Gram matrix not PSD"
+    );
+
+    let wl_raw = wl_gram_matrix(&refs, 3, GramNormalization::Raw);
+    assert!(
+        is_psd_via_cholesky(&wl_raw, 1e-6),
+        "WL kernel Gram matrix not PSD"
+    );
+
+    let sp_raw = shortest_path_gram_matrix(&refs, GramNormalization::Raw);
+    assert!(
+        is_psd_via_cholesky(&sp_raw, 1e-6),
+        "shortest-path kernel Gram matrix not PSD"
+    );
+
+    // Cosine-normalized variants must also be PSD (a diagonal rescaling D^{-1/2} K
+    // D^{-1/2} of a PSD matrix K is PSD).
+    let g_cos = graphlet_gram_matrix(&refs, 3, GramNormalization::Cosine);
+    assert!(
+        is_psd_via_cholesky(&g_cos, 1e-6),
+        "cosine graphlet Gram matrix not PSD"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PROPTEST: kernel symmetry, isomorphism invariance, PSD-via-Cholesky.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(120))]
+
+    /// Symmetry over randomly generated graph pairs, for all three kernels.
+    #[test]
+    fn prop_kernel_symmetry((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        // A second, independently-shaped graph on the same node count (bits
+        // reversed), so the pair is generally non-isomorphic.
+        let bits2: Vec<bool> = bits.iter().rev().copied().collect();
+        let edges2 = edges_from_bits(n, &bits2);
+        let h = build_un(&edges2, n);
+
+        if n >= 2 {
+            let fg = graphlet_features(&g, 2);
+            let fh = graphlet_features(&h, 2);
+            prop_assert_eq!(graphlet_kernel(&fg, &fh), graphlet_kernel(&fh, &fg));
+        }
+        prop_assert_eq!(wl_kernel_pair(&g, &h, 2), wl_kernel_pair(&h, &g, 2));
+
+        let sg = shortest_path_histogram(&g);
+        let sh = shortest_path_histogram(&h);
+        prop_assert_eq!(shortest_path_kernel(&sg, &sh), shortest_path_kernel(&sh, &sg));
+    }
+
+    /// Isomorphism invariance under random relabelling, for all three kernels.
+    #[test]
+    fn prop_kernel_isomorphism_invariant((n, bits, seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let mut order: Vec<usize> = (0..n).collect();
+        order.shuffle(&mut StdRng::seed_from_u64(seed));
+        let gp = build_perm_un(&edges, n, &order);
+
+        if n >= 2 {
+            let fg = graphlet_features(&g, 2);
+            let fgp = graphlet_features(&gp, 2);
+            prop_assert_eq!(&fg, &fgp, "graphlet features must be relabelling-invariant");
+        }
+
+        let hg = shortest_path_histogram(&g);
+        let hgp = shortest_path_histogram(&gp);
+        prop_assert_eq!(&hg, &hgp, "SP histogram must be relabelling-invariant");
+
+        prop_assert_eq!(
+            wl_kernel_pair(&g, &g, 2),
+            wl_kernel_pair(&g, &gp, 2),
+            "WL kernel(g,g) must equal kernel(g, relabelled g)"
+        );
+    }
+
+    /// PSD-via-Cholesky of the Gram matrix over small randomly generated graph
+    /// batches, for all three kernels (both raw and cosine-normalized).
+    #[test]
+    fn prop_gram_matrix_psd(seed in any::<u64>()) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let batch: Vec<UnGraph<(), ()>> = (0u64..6)
+            .map(|i| {
+                let n = 2 + (rng.gen::<u8>() % 6) as usize; // 2..=7 nodes
+                build_un(&random_edges(n, 0.4, seed.wrapping_add(i)), n)
+            })
+            .collect();
+        let refs: Vec<&UnGraph<(), ()>> = batch.iter().collect();
+
+        let g_raw = graphlet_gram_matrix(&refs, 2, GramNormalization::Raw);
+        prop_assert!(is_psd_via_cholesky(&g_raw, 1e-5), "graphlet Gram not PSD, seed={seed}");
+        let g_cos = graphlet_gram_matrix(&refs, 2, GramNormalization::Cosine);
+        prop_assert!(is_psd_via_cholesky(&g_cos, 1e-5), "graphlet cosine Gram not PSD, seed={seed}");
+
+        let wl_raw = wl_gram_matrix(&refs, 2, GramNormalization::Raw);
+        prop_assert!(is_psd_via_cholesky(&wl_raw, 1e-5), "WL Gram not PSD, seed={seed}");
+
+        let sp_raw = shortest_path_gram_matrix(&refs, GramNormalization::Raw);
+        prop_assert!(is_psd_via_cholesky(&sp_raw, 1e-5), "SP Gram not PSD, seed={seed}");
+    }
+}
