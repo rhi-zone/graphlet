@@ -44,10 +44,21 @@ pub mod neighborhood;
 
 /// Scalable graphlet counting beyond naive per-subset canonicalization.
 ///
-/// TODO (ADR-0290, OPEN gate): naive canonicalization is untenable at biological
-/// scale for k = 5. Needs ORCA orbit-count equations or a g-trie, plus
-/// ORCA-permutation alignment of the internal orbit ids.
-pub mod scalable {}
+/// Implemented (ADR-0290, phase 6, partial close): an ORCA-style (Hočevar & Demšar
+/// 2014) fast per-node orbit counter for graphlets of order `2..=4` (orbits `0..=14`)
+/// — count degree, per-edge triangle, and per-vertex K4 quantities once, then solve a
+/// small per-vertex linear system, instead of enumerating every connected 4-subset.
+/// Verified exact against the census substrate's own `graphlet_degree_vectors` /
+/// `count`, node-for-node and count-for-count, across a large battery plus a
+/// proptest. See [`scalable::fast_graphlet_degree_vectors`] and
+/// [`scalable::fast_count`].
+///
+/// **Still open (not this phase):** the full order-5 system (58 more orbits) is a
+/// much larger equation set; completing it faithfully and verifiably was out of scope
+/// here, so k = 5 fast counting is not yet implemented — use the exact
+/// `graphlet_degree_vectors` / `count` for k = 5 in the meantime. See the module docs
+/// for the exact boundary.
+pub mod scalable;
 
 /// Directed motif analysis at k ≥ 4.
 ///
