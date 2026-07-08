@@ -6,9 +6,12 @@
 //! bit per ordered pair `(i, j)`, `i != j`). Two directed subgraphs share a
 //! [`DirectedClassId`] iff they are isomorphic *as directed graphs* (an isomorphism
 //! must map arcs to arcs preserving direction). Exhaustive over `k!` permutations —
-//! intended for `k <= 4` (`k = 3` for the triad census, `k = 4` for the directed
+//! intended for `k <= 5` (`k = 3` for the triad census, `k in 4..=5` for the directed
 //! graphlet census); `k(k-1)` bits fits comfortably in `u64` up to `k = 8`, but
-//! `k!`-exhaustive canonicalization is only cheap through `k = 4`.
+//! `k!`-exhaustive canonicalization is only cheap through `k = 4` — at `k = 5` it is
+//! still exact but noticeably slower (the per-instance canonicalization exhausts `120`
+//! permutations, and the one-time [`all_weakly_connected_classes`] ground-truth sweep
+//! at registry-build time exhausts all `2^20` labelled digraphs).
 
 /// A stable directed-graphlet-class identifier: the canonical (minimum) ordered-pair
 /// arc bitmask. Comparable and hashable; its numeric value is an implementation
