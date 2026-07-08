@@ -3785,36 +3785,39 @@ proptest! {
 }
 
 // ===========================================================================
-// SCALABLE COUNTING (phase 6): fast ORCA-style orbit counting for k <= 4 (orbits
-// 0..=14) must equal the exact census/GDV node-for-node and count-for-count. This is
-// the crux — the oracle is the crate's own exact `graphlet_degree_vectors` / `count`.
+// SCALABLE COUNTING (phases 6 + 8): fast ORCA-style orbit counting over ALL 73 orbits
+// (orders 2..=5) must equal the exact census/GDV node-for-node and count-for-count.
+// This is the crux — the oracle is the crate's own exact `graphlet_degree_vectors` /
+// `count`. A single mismatch in any order-5 orbit (15..=72) means a coefficient is
+// wrong; the fix is the coefficient, never the oracle.
 // ===========================================================================
 
-/// Assert the fast path equals the exact path, node-for-node (GDV, orbits 0..=14) and
-/// count-for-count (census, k = 2..=4), on one host graph.
+/// Assert the fast path equals the exact path, node-for-node over *all 73 orbits*
+/// (orders `2..=5`) and count-for-count (census, k = 2..=5), on one host graph.
 fn assert_fast_equals_exact(edges: &[(usize, usize)], n: usize, label: &str) {
     let g = build_un(edges, n);
     let reg = Registry::build();
 
     let exact_gdv = graphlet_degree_vectors(&g, &reg);
     let fast_gdv = fast_graphlet_degree_vectors(&g, &reg);
-    assert_eq!(fast_gdv.orbit_count(), FAST_ORBIT_COUNT);
+    assert_eq!(fast_gdv.orbit_count(), reg.orbit_count());
+    assert_eq!(fast_gdv.orbit_count(), 73);
+    assert!(FAST_ORBIT_COUNT <= fast_gdv.orbit_count());
     assert_eq!(
         exact_gdv.len(),
         fast_gdv.len(),
         "{label}: node count mismatch"
     );
     for i in 0..exact_gdv.len() {
-        let exact_prefix = &exact_gdv.row(i)[0..FAST_ORBIT_COUNT];
         assert_eq!(
-            exact_prefix,
+            exact_gdv.row(i),
             fast_gdv.row(i),
             "{label}: GDV mismatch at node {i} (host id {:?})",
             exact_gdv.id(i)
         );
     }
 
-    for k in 2..=4 {
+    for k in 2..=5 {
         let sel = Selector::connected_k_subsets(k);
         let exact_census = count(&g, &sel);
         let fast_census = fast_count(&g, &reg, &sel);
@@ -3887,18 +3890,80 @@ proptest! {
 
         let exact_gdv = graphlet_degree_vectors(&g, &reg);
         let fast_gdv = fast_graphlet_degree_vectors(&g, &reg);
+        prop_assert_eq!(fast_gdv.orbit_count(), 73);
         prop_assert_eq!(exact_gdv.len(), fast_gdv.len());
         for i in 0..exact_gdv.len() {
             prop_assert_eq!(
-                &exact_gdv.row(i)[0..FAST_ORBIT_COUNT],
+                exact_gdv.row(i),
                 fast_gdv.row(i),
                 "GDV mismatch at node {}", i
             );
         }
-        for k in 2..=4 {
+        for k in 2..=5 {
             let sel = Selector::connected_k_subsets(k);
             prop_assert_eq!(count(&g, &sel), fast_count(&g, &reg, &sel));
         }
+    }
+}
+
+/// A larger/denser fuzz sweep aimed squarely at the 58 order-5 orbits: hosts big and
+/// dense enough that every order-5 graphlet class occurs many times, so a wrong
+/// coefficient in any single orbit `15..=72` would surface. Every one of the 73 orbits
+/// (and the k=5 class census) must match the exact oracle node-for-node.
+#[test]
+fn fast_orbit_counts_exact_order5_dense_battery() {
+    for seed in 0..60u64 {
+        let n = 8 + (seed as usize % 8); // 8..=15
+        let p = 0.2 + 0.7 * ((seed % 8) as f64 / 8.0); // 0.2..~0.81
+        let edges = random_edges(n, p, 7000 + seed);
+        assert_fast_equals_exact(
+            &edges,
+            n,
+            &format!("order5 fuzz n={n} p={p:.2} seed={seed}"),
+        );
+    }
+    // Wheels W_n (a hub joined to a rim cycle): dense triangle fans that exercise the
+    // hub-centred order-5 orbits heavily.
+    for rim in [5usize, 6, 7, 8] {
+        let mut edges: Vec<(usize, usize)> = (0..rim).map(|i| (i, (i + 1) % rim)).collect();
+        edges.extend((0..rim).map(|i| (i, rim)));
+        assert_fast_equals_exact(&edges, rim + 1, &format!("wheel W{rim}"));
+    }
+}
+
+/// Speed floor for the order-5 fast path: on a graph large/dense enough to matter, the
+/// full-73-orbit fast path must beat the exact k=5 enumeration by a wide margin (the
+/// whole point of the module). Kept `#[ignore]` so the timing does not tax the normal
+/// suite; run with `cargo test --release -- --ignored fast_order5_speedup`.
+#[test]
+#[ignore]
+fn fast_order5_speedup() {
+    use std::time::Instant;
+    let reg = Registry::build();
+    for &(n, p) in &[(40usize, 0.3_f64), (60, 0.3), (80, 0.25)] {
+        let edges = random_edges(n, p, 42);
+        let g = build_un(&edges, n);
+
+        let t0 = Instant::now();
+        let exact = graphlet_degree_vectors(&g, &reg);
+        let te = t0.elapsed();
+
+        let t1 = Instant::now();
+        let fast = fast_graphlet_degree_vectors(&g, &reg);
+        let tf = t1.elapsed();
+
+        for i in 0..exact.len() {
+            assert_eq!(exact.row(i), fast.row(i), "n={n} node {i}");
+        }
+        let speedup = te.as_secs_f64() / tf.as_secs_f64();
+        println!(
+            "n={n} p={p} edges={} exact={te:?} fast={tf:?} speedup={speedup:.1}x",
+            edges.len()
+        );
+        assert!(
+            speedup > 3.0,
+            "fast order-5 path must substantially beat exact (got {speedup:.1}x at n={n})"
+        );
     }
 }
 

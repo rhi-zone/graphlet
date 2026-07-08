@@ -1,41 +1,62 @@
-//! Scalable graphlet-orbit counting, ORCA-style (Hočevar & Demšar 2014): count a
-//! handful of directly-observable local structures — per-vertex degree, per-edge
-//! triangle (common-neighbor) counts, and per-vertex K4 membership — once each in a
-//! single pass, then recover the remaining 4-node orbit counts by solving a small
-//! per-vertex linear system, instead of enumerating and canonically labelling every
-//! connected 4-subset.
+//! Scalable graphlet-orbit counting, ORCA-style (Hočevar & Demšar 2014): recover the
+//! full per-node graphlet-degree vector over all 73 orbits (graphlets of order
+//! `2..=5`) from directly-observable local structure, **without ever enumerating or
+//! canonically labelling a connected 5-subset** — the expensive `k!`-permutation
+//! canonicalization the exact [`graphlet_degree_vectors`] pays per instance.
 //!
-//! **Scope (the ADR-0290 scalable-k=5 gate is only partly closed here):** this module
-//! covers orbits `0..=14` — every graphlet of order `2..=4` (the same 15-orbit prefix
-//! ORCA calls "orbits of graphlets up to size 4"). The full order-5 system (58 more
-//! orbits, orbits `15..=72`) is a much larger system of equations; completing it
-//! faithfully and verifiably was out of scope for this pass, so **k = 5 fast counting
-//! is not yet implemented** — use the exact [`graphlet_degree_vectors`] /
-//! [`count`](crate::count) for `k = 5` in the meantime. Nothing here is approximate:
-//! every value this module returns for orbits `0..=14` is asserted, by a large
-//! differential test battery plus a property test, to equal the exact census
-//! node-for-node and count-for-count. A wrong equation is a bug to fix, not a
-//! trade-off to ship.
+//! **Two ORCA-family layers, both clean-room from the published mathematics** (derived
+//! and verified against this crate's own exact oracle — no code, variable structure, or
+//! equation transcription was taken from the GPL `orca` reference implementation):
 //!
-//! The 15-orbit output uses the crate's own global orbit ids (from [`Registry`]) —
-//! not a hardcoded assumption — column `id` of the fast table always means the same
-//! orbit as column `id` of the exact [`GdvTable`], because [`Registry::build`] assigns
-//! ids order-ascending-then-class-ascending-then-orbit-ascending, so ids `0..=14` are
-//! *exactly* the orders `2..=4` (1 + 3 + 11 orbits) and always come first. The
-//! bijection from this module's raw (arbitrarily-ordered) equation output to those ids
-//! is discovered once, empirically, against a battery of small representative
-//! graphlets — not hand-transcribed — so a mismatch between this module's equations
-//! and the registry's orbit identity fails loudly (a panic) rather than silently
-//! mislabelling a column.
+//! - **Orbits `0..=14` (orders `2..=4`).** Count per-vertex degree, per-edge triangle
+//!   (common-neighbour) counts, and per-vertex K4 membership once each, then recover the
+//!   eleven 4-node orbits by solving a small per-vertex linear system.
+//! - **Orbits `15..=72` (order 5, the 58 five-node orbits).** Enumerate every connected
+//!   induced *4*-subset once (an order of magnitude cheaper than the 5-subset census),
+//!   and for each such core tally how many outside vertices attach with each induced
+//!   adjacency pattern to the four core nodes. A per-`(core-structure, attachment)`
+//!   table — built once from this crate's own canonical/registry machinery, so the fast
+//!   path attributes to exactly the global orbit ids the exact path would — turns each
+//!   tally into the order-5 orbit every core node occupies in the reconstructed
+//!   5-graphlet. Attributing to the four core nodes counts each node's order-5 orbit
+//!   membership a fixed number of times: the per-orbit *core multiplicity*
+//!   `M_o = #{ w : graphlet − w is connected }` (constant on an orbit, computed once
+//!   from the class machinery). Dividing it out — an exact division, asserted, never a
+//!   rounding — yields the true count. This is the ORCA idea (combinatorial counting of
+//!   order-5 orbits through smaller cores plus common-neighbour tallies, closed by a
+//!   linear correction) realised as a decomposition whose every coefficient is derived
+//!   from the crate's exact machinery rather than transcribed.
+//!
+//! Nothing here is approximate: every value this module returns — all 73 orbits — is
+//! asserted, by a large differential test battery plus a property test, to equal the
+//! exact census node-for-node and count-for-count. A wrong coefficient is a bug to fix,
+//! not a trade-off to ship.
+//!
+//! The output uses the crate's own global orbit ids (from [`Registry`]) — never a
+//! hardcoded assumption — so column `id` of the fast table always means the same orbit
+//! as column `id` of the exact [`GdvTable`]. For the `0..=14` prefix the bijection from
+//! this module's raw (arbitrarily-ordered) equation output to those ids is discovered
+//! once, empirically, against a battery of small representative graphlets; for the
+//! order-5 block the ids come straight from [`Registry`]'s own canonical labelling of
+//! the reconstructed graphlet, so a mismatch fails loudly (a panic or an oracle
+//! disagreement) rather than silently mislabelling a column.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use crate::census::Census;
+use crate::canonical::{all_connected_classes, canonical_arg_by, class_to_adj, perms};
+use crate::census::{for_each_subset, Census};
 use crate::{ClassId, GdvTable, GraphAdapter, Registry, Selector, Snapshot};
 
-/// Number of orbits covered by the fast path: every graphlet of order `2..=4`.
+/// Number of orbits in the order-`2..=4` fast prefix (the linear-system layer): every
+/// graphlet of order `2..=4`. The full fast table is [`Registry::orbit_count`] wide
+/// (73), covering orders `2..=5`; this constant names only the prefix width.
 pub const FAST_ORBIT_COUNT: usize = 15;
+
+/// Global orbit id of the first order-5 orbit: orbits `FIVE_ORBIT_LO..73` are the 58
+/// five-node orbits, which follow the 15 order-`2..=4` orbits in [`Registry`]'s
+/// order-ascending numbering.
+const FIVE_ORBIT_LO: usize = FAST_ORBIT_COUNT;
 
 /// Per-edge triangle (common-neighbor) counts, keyed by the sorted endpoint pair.
 ///
@@ -341,14 +362,221 @@ fn orca_to_registry_map(reg: &Registry) -> [usize; FAST_ORBIT_COUNT] {
     map
 }
 
-/// Compute the graphlet-degree vector of every node, restricted to orbits `0..=14`
-/// (graphlets of order `2..=4`), without enumerating or canonically labelling every
-/// connected 4-subset.
+// ===========================================================================
+// Order-5 layer: the 58 five-node orbits (global ids 15..=72), recovered from
+// connected 4-subset seeds plus induced-attachment tallies. See the module docs.
+// ===========================================================================
+
+/// The six upper-triangle vertex pairs of a 4-node core, in the bit order used to key
+/// [`FiveTable`] by the core's induced structure.
+const CORE_PAIRS: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+
+/// Is the 5-vertex graph given by a boolean adjacency matrix connected?
+fn connected5(mat: &[[bool; 5]; 5]) -> bool {
+    let mut seen = [false; 5];
+    let mut stack = vec![0usize];
+    seen[0] = true;
+    let mut cnt = 1;
+    while let Some(v) = stack.pop() {
+        for u in 0..5 {
+            if mat[v][u] && !seen[u] {
+                seen[u] = true;
+                cnt += 1;
+                stack.push(u);
+            }
+        }
+    }
+    cnt == 5
+}
+
+/// Is the graphlet `adj` (order 5) still connected after deleting vertex `w`?
+fn connected_without(adj: &[Vec<usize>], w: usize) -> bool {
+    let n = adj.len();
+    let start = (0..n).find(|&v| v != w);
+    let Some(start) = start else { return true };
+    let mut seen = vec![false; n];
+    seen[w] = true;
+    seen[start] = true;
+    let mut stack = vec![start];
+    let mut cnt = 1;
+    while let Some(v) = stack.pop() {
+        for &u in &adj[v] {
+            if !seen[u] {
+                seen[u] = true;
+                cnt += 1;
+                stack.push(u);
+            }
+        }
+    }
+    cnt == n - 1
+}
+
+/// Precomputed order-5 decomposition tables, built once per [`Registry`] from the
+/// crate's own canonical/registry machinery (never transcribed).
+struct FiveTable {
+    /// Indexed by `(core_struct << 4) | attach`: `core_struct` is the 6-bit induced
+    /// adjacency of the four core positions `0..4` in [`CORE_PAIRS`] order, `attach` is
+    /// the 4-bit adjacency of the fifth vertex to core positions `0..4`. Each entry is
+    /// the global orbit id occupied by core positions `0,1,2,3` in the reconstructed
+    /// 5-graphlet; [`usize::MAX`] marks a `(core_struct, attach)` whose 5-vertex graph
+    /// is disconnected (never looked up at runtime, since cores are connected and
+    /// `attach != 0`).
+    orbit_of_pos: Vec<[usize; 4]>,
+    /// Per-global-orbit-id core multiplicity `M_o` (only ids `FIVE_ORBIT_LO..73` are
+    /// meaningful): the number of order-5 vertices whose removal leaves the graphlet
+    /// connected, i.e. the number of connected 4-subset cores an orbit-`o` node is
+    /// attributed through. Always `>= 1` (every connected order-5 graph has a
+    /// non-cut vertex distinct from any given vertex).
+    mult: Vec<u64>,
+}
+
+impl FiveTable {
+    fn build(reg: &Registry) -> Self {
+        let ps = perms(5);
+        let mut orbit_of_pos = vec![[usize::MAX; 4]; 64 * 16];
+        for core in 0u32..64 {
+            for attach in 0u32..16 {
+                let mut mat = [[false; 5]; 5];
+                for (b, &(i, j)) in CORE_PAIRS.iter().enumerate() {
+                    if core & (1 << b) != 0 {
+                        mat[i][j] = true;
+                        mat[j][i] = true;
+                    }
+                }
+                for (i, row) in mat.iter_mut().enumerate().take(4) {
+                    if attach & (1 << i) != 0 {
+                        row[4] = true;
+                    }
+                }
+                for (i, cell) in mat[4].iter_mut().enumerate().take(4) {
+                    if attach & (1 << i) != 0 {
+                        *cell = true;
+                    }
+                }
+                if !connected5(&mat) {
+                    continue;
+                }
+                let (class, arg) = canonical_arg_by(5, &ps, |i, j| mat[i][j]);
+                let slotmap = reg.slot_ids(5, class);
+                // Canonical slot `c` is filled by graph position `arg[c]`, which the
+                // exact path attributes to global orbit `slotmap[c]`. Invert to a
+                // position -> orbit map, then keep the four core positions.
+                let mut pos_orbit = [usize::MAX; 5];
+                for (c, &slot) in slotmap.iter().enumerate() {
+                    pos_orbit[arg[c]] = slot;
+                }
+                let idx = (core as usize) << 4 | attach as usize;
+                orbit_of_pos[idx] = [pos_orbit[0], pos_orbit[1], pos_orbit[2], pos_orbit[3]];
+            }
+        }
+
+        let mut mult = vec![0u64; reg.orbit_count()];
+        for class in all_connected_classes(5) {
+            let adj = class_to_adj(class, 5);
+            for (c, &orbit) in reg.slot_ids(5, class).iter().enumerate() {
+                let m = (0..5)
+                    .filter(|&w| w != c && connected_without(&adj, w))
+                    .count() as u64;
+                mult[orbit] = m;
+            }
+        }
+        FiveTable { orbit_of_pos, mult }
+    }
+}
+
+/// Per-node order-5 orbit counts (global ids `FIVE_ORBIT_LO..73`), recovered from
+/// connected 4-subset seeds. Returns one length-`reg.orbit_count()` row per node;
+/// entries below [`FIVE_ORBIT_LO`] are left zero (filled by the order-`2..=4` layer).
+fn five_node_orbit_counts<N: Copy>(
+    snapshot: &Snapshot<N>,
+    reg: &Registry,
+    ft: &FiveTable,
+) -> Vec<Vec<u64>> {
+    let n = snapshot.len();
+    let total = reg.orbit_count();
+    // Accumulate the (overcounted-by-M_o) attributions.
+    let mut acc = vec![vec![0u64; total]; n];
+    // Reusable dedup stamp for gathering the outside vertices of each core.
+    let mut stamp = vec![u32::MAX; n];
+    let mut generation: u32 = 0;
+
+    for_each_subset(snapshot, 4, |sub| {
+        let (c0, c1, c2, c3) = (sub[0], sub[1], sub[2], sub[3]);
+        // Induced structure of the core in CORE_PAIRS order.
+        let mut core = 0u32;
+        for (b, &(i, j)) in CORE_PAIRS.iter().enumerate() {
+            if snapshot.adjacent(sub[i], sub[j]) {
+                core |= 1 << b;
+            }
+        }
+        // Tally, over every outside vertex adjacent to at least one core node, its
+        // 4-bit induced adjacency pattern to (c0, c1, c2, c3).
+        generation = generation.wrapping_add(1);
+        // Guard against a stamp value colliding with a stale one after wraparound.
+        if generation == u32::MAX {
+            stamp.iter_mut().for_each(|s| *s = u32::MAX - 1);
+            generation = 0;
+        }
+        for &c in &[c0, c1, c2, c3] {
+            stamp[c] = generation;
+        }
+        let mut counts = [0u64; 16];
+        for &c in &[c0, c1, c2, c3] {
+            for &u in snapshot.neighbors(c) {
+                if stamp[u] == generation {
+                    continue;
+                }
+                stamp[u] = generation;
+                let mut mask = 0usize;
+                if snapshot.adjacent(u, c0) {
+                    mask |= 1;
+                }
+                if snapshot.adjacent(u, c1) {
+                    mask |= 2;
+                }
+                if snapshot.adjacent(u, c2) {
+                    mask |= 4;
+                }
+                if snapshot.adjacent(u, c3) {
+                    mask |= 8;
+                }
+                counts[mask] += 1;
+            }
+        }
+        let base = (core as usize) << 4;
+        for (attach, &cnt) in counts.iter().enumerate().skip(1) {
+            if cnt == 0 {
+                continue;
+            }
+            let orbits = ft.orbit_of_pos[base | attach];
+            for (pos, &node) in [c0, c1, c2, c3].iter().enumerate() {
+                acc[node][orbits[pos]] += cnt;
+            }
+        }
+    });
+
+    // Divide out the per-orbit core multiplicity — exact, or a bug.
+    for row in &mut acc {
+        for (id, cell) in row.iter_mut().enumerate().take(total).skip(FIVE_ORBIT_LO) {
+            let m = ft.mult[id];
+            debug_assert!(m >= 1, "order-5 orbit {id} has zero core multiplicity");
+            debug_assert!(
+                *cell % m == 0,
+                "order-5 orbit {id} accumulated {} not divisible by multiplicity {m}: a bug",
+                *cell
+            );
+            *cell /= m;
+        }
+    }
+    acc
+}
+
+/// Compute the graphlet-degree vector of every node over all 73 orbits (graphlets of
+/// order `2..=5`), without enumerating or canonically labelling a connected 5-subset.
 ///
-/// The returned [`GdvTable::orbit_count`] is [`FAST_ORBIT_COUNT`] (15); column `id`
-/// means the same orbit as column `id` of the exact [`graphlet_degree_vectors`] — the
-/// two are directly comparable prefix-wise. `k = 5` orbits are out of scope for this
-/// fast path (see the module docs); use the exact function for those.
+/// The returned [`GdvTable::orbit_count`] is [`Registry::orbit_count`] (73); column
+/// `id` means the same orbit as column `id` of the exact [`graphlet_degree_vectors`],
+/// so the two tables are directly comparable in full.
 ///
 /// `g` is treated as a *simple undirected* graph, matching every other entry point in
 /// this crate (see [`GraphAdapter`]).
@@ -358,10 +586,17 @@ where
     G: GraphAdapter,
 {
     let snapshot = Snapshot::new(g);
+    let n = snapshot.len();
+    let total = reg.orbit_count();
+
+    // Order-2..=4 layer: the linear-system fast path, mapped to global ids 0..=14.
     let raw = raw_orbit_counts(&snapshot);
     let map = orca_to_registry_map(reg);
-    let n = snapshot.len();
-    let mut rows = vec![vec![0u64; FAST_ORBIT_COUNT]; n];
+
+    // Order-5 layer: 4-subset-seed decomposition into global ids 15..=72.
+    let ft = FiveTable::build(reg);
+    let mut rows = five_node_orbit_counts(&snapshot, reg, &ft);
+
     for (i, row) in rows.iter_mut().enumerate() {
         for (raw_idx, &id) in map.iter().enumerate() {
             debug_assert!(
@@ -372,10 +607,10 @@ where
         }
     }
     let ids = (0..n).map(|i| snapshot.id(i)).collect();
-    GdvTable::from_parts(FAST_ORBIT_COUNT, ids, rows)
+    GdvTable::from_parts(total, ids, rows)
 }
 
-/// Fast graphlet-class census for one order `sel.k() <= 4`: connected-subgraph counts
+/// Fast graphlet-class census for one order `sel.k() <= 5`: connected-subgraph counts
 /// for every class of that order, derived from [`fast_graphlet_degree_vectors`] via
 /// `Σ_v GDV[v][o] = count(class) · size(o)` (documented on [`Registry`]) rather than a
 /// second enumeration pass.
@@ -388,21 +623,23 @@ where
 ///
 /// # Panics
 ///
-/// Panics if `sel.k() > 4`: this fast path does not cover order 5 (see module docs).
+/// Panics if `sel.k() > 5`: the science-facing surface is closed at order 5 (the
+/// registry only numbers orbits for orders `2..=5`).
 #[must_use]
 pub fn fast_count<G>(g: G, reg: &Registry, sel: &Selector) -> Census
 where
     G: GraphAdapter,
 {
     assert!(
-        sel.k() <= 4,
-        "fast_count only covers graphlet orders 2..=4 (got k = {}); use `count` for k = 5",
+        sel.k() <= 5,
+        "fast_count covers graphlet orders 2..=5 (got k = {}); the orbit registry is \
+         closed at k = 5",
         sel.k()
     );
     let table = fast_graphlet_degree_vectors(g, reg);
     let mut census = Census::new();
     let mut seen: HashSet<u64> = HashSet::new();
-    for id in 0..FAST_ORBIT_COUNT {
+    for id in 0..reg.orbit_count() {
         let (order, class_mask, size) = reg.orbit_meta(id);
         if order != sel.k() || !seen.insert(class_mask) {
             continue;
