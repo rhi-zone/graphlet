@@ -5,9 +5,9 @@
 //! the traversal — but two things change: connectivity is checked against the
 //! *undirected union* of arcs (a subset only needs to be weakly connected), while class
 //! labelling uses the *directed* arc relation (so `a -> b` and `b -> a` are distinct).
-//! Capped at `k <= 4` ([`MAX_K`]): `k = 3` for the (connected-only) directed-triad
-//! graphlet, `k = 4` for the directed graphlet census; the full 16-type triad census
-//! (including disconnected types) lives separately in
+//! Capped at `k <= 5` ([`MAX_K`]): `k = 3` for the (connected-only) directed-triad
+//! graphlet, `k in 4..=5` for the directed graphlet census; the full 16-type triad
+//! census (including disconnected types) lives separately in
 //! [`crate::rim::directed::triad`].
 
 use std::collections::HashMap;
@@ -20,9 +20,11 @@ use crate::canonical::perms;
 /// smaller than the undirected [`crate::census::MAX_K`]: canonicalization still
 /// exhausts `k!` permutations, but the mask now needs `k(k-1)` bits instead of
 /// `k(k-1)/2`, and — more binding — the automorphism/orbit registry enumerates all
-/// `2^(k(k-1))` labelled digraphs once at build time, which is only cheap through
-/// `k = 4`).
-pub const MAX_K: usize = 4;
+/// `2^(k(k-1))` labelled digraphs once at build time. That sweep is `2^20` masks at
+/// `k = 5` (still exact, but slow — seconds, not microseconds — to build the
+/// [`crate::rim::directed::orbit::DirectedRegistry`]); `k = 6` would need `2^30` and is
+/// out of scope).
+pub const MAX_K: usize = 5;
 
 /// One connected (weakly) induced k-node directed subgraph: its host `NodeId`s and its
 /// directed-graphlet class.
@@ -45,7 +47,7 @@ impl DirectedSelector {
     ///
     /// # Panics
     ///
-    /// Panics unless `2 <= k <= MAX_K` (currently 4).
+    /// Panics unless `2 <= k <= MAX_K` (currently 5).
     #[must_use]
     pub fn weakly_connected_k_subsets(k: usize) -> Self {
         assert!(
@@ -129,7 +131,7 @@ pub(crate) fn for_each_subset<N: Copy>(
 ///
 /// Unlike the undirected [`crate::Instances`], this collects instances up front rather
 /// than driving a lazy explicit-stack traversal: directed support is capped at
-/// `k <= 4`, where instance counts stay bounded, so the undirected core's O(V+E)-memory
+/// `k <= 5`, where instance counts stay bounded, so the undirected core's O(V+E)-memory
 /// streaming discipline is not load-bearing here.
 pub struct DirectedInstances<N> {
     items: std::vec::IntoIter<DirectedInstance<N>>,

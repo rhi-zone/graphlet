@@ -4,10 +4,10 @@
 //! automorphisms: two nodes of one directed graphlet are in the same orbit when a
 //! direction-preserving automorphism (a permutation whose relabelled arc mask equals
 //! the class mask) maps one to the other. Covers weakly-connected directed graphlets
-//! of order `2..=4` (the [`crate::rim::directed::census::MAX_K`] boundary — directed
-//! k = 5 orbits are not implemented; use the exact undirected
-//! [`crate::graphlet_degree_vectors`] / [`crate::count`] for k = 5 in the meantime, on
-//! the graph's underlying undirected structure).
+//! of order `2..=5` (the [`crate::rim::directed::census::MAX_K`] boundary). Building
+//! the [`DirectedRegistry`] at `k = 5` sweeps all `2^20` labelled digraphs once at
+//! registry-build time; it is exact but slow (seconds, not microseconds) — see the
+//! performance caveat in the [`crate::rim::directed`] module docs.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,8 +17,8 @@ use super::snapshot::{DirectedGraphAdapter, DirectedSnapshot};
 use crate::canonical::perms;
 
 /// The maximum directed graphlet order attributed (weakly connected, closed at
-/// `k <= 4`).
-const MAX_K: usize = 4;
+/// `k <= 5`).
+const MAX_K: usize = 5;
 
 /// The directed automorphism-orbit registry: assigns a dense global orbit id to every
 /// (class, local-orbit) across orders `2..=MAX_K`, and records each orbit's size.
@@ -31,7 +31,7 @@ pub struct DirectedRegistry {
 }
 
 impl DirectedRegistry {
-    /// Build the directed orbit registry for orders `2..=4`.
+    /// Build the directed orbit registry for orders `2..=5`.
     #[must_use]
     pub fn build() -> Self {
         let mut slot_global = HashMap::new();
@@ -60,7 +60,7 @@ impl DirectedRegistry {
         }
     }
 
-    /// Total number of directed orbits across orders `2..=4`.
+    /// Total number of directed orbits across orders `2..=5`.
     #[inline]
     #[must_use]
     pub fn orbit_count(&self) -> usize {
@@ -75,7 +75,7 @@ impl DirectedRegistry {
     }
 
     /// Number of distinct weakly-connected directed-graphlet classes at order `k`
-    /// (`k` in `2..=4`), or 0 if `k` is out of that range.
+    /// (`k` in `2..=5`), or 0 if `k` is out of that range.
     #[must_use]
     pub fn class_count(&self, k: usize) -> usize {
         self.slot_global.keys().filter(|&&(kk, _)| kk == k).count()
@@ -186,7 +186,7 @@ impl<N: Copy> DirectedGdvTable<N> {
 }
 
 /// Compute the directed graphlet-degree vector of every node (weakly-connected orders
-/// `2..=4`).
+/// `2..=5`).
 ///
 /// One weakly-connected-ESU pass per order attributes each node of each instance to
 /// its directed orbit. Pass a [`DirectedRegistry`] so it can be reused across graphs.

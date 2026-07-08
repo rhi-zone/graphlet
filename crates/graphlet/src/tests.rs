@@ -3903,8 +3903,10 @@ proptest! {
 }
 
 // ===========================================================================
-// DIRECTED (phase 7): triad census (k=3, all 16 standard types, connectivity
-// unrestricted) and the directed graphlet census/orbits (weakly-connected, k=2..=4).
+// DIRECTED (phase 7, extended to k=5): triad census (k=3, all 16 standard types,
+// connectivity unrestricted) and the directed graphlet census/orbits (weakly-connected,
+// k=2..=5). k=5 is exact but slow (see the performance caveat in the `rim::directed`
+// module docs) — its independent-oracle checks below are kept on small hosts (n<=7).
 //
 // Independent-oracle strategy, mirroring the undirected precedent above
 // (`indep_mask`/`census_oracle`/`gdv_oracle` are separate re-implementations of
@@ -3914,7 +3916,7 @@ proptest! {
 //     M/A/N-count branching), with its mask -> TriadType table populated from
 //     concrete hand-built examples matching definitions confirmed against igraph's
 //     published `triad_census` documentation (021D/U/C, 111D/U, 120D/U/C).
-//   - k=4 classes/orbits: independent combination-based (not ESU) weakly-connected
+//   - k=4/k=5 classes/orbits: independent combination-based (not ESU) weakly-connected
 //     enumeration, independent canonical-arg computation, cross-checked against
 //     production `count_directed`/`directed_graphlet_degree_vectors`.
 // ===========================================================================
@@ -3924,6 +3926,15 @@ use crate::rim::directed::{
     count_directed, directed_graphlet_degree_vectors, enumerate_directed, DirectedCensus,
     DirectedClassId, DirectedRegistry, DirectedSelector,
 };
+
+/// Shared, lazily-built `DirectedRegistry` for the k=5 tests below. Building it sweeps
+/// all `2^20` labelled 5-node digraphs once (seconds, not microseconds — see the
+/// performance caveat in `rim::directed`'s module docs); every test that needs a
+/// registry reaches for this cached instance instead of paying that sweep again.
+fn shared_directed_registry() -> &'static DirectedRegistry {
+    static REG: std::sync::OnceLock<DirectedRegistry> = std::sync::OnceLock::new();
+    REG.get_or_init(DirectedRegistry::build)
+}
 
 /// Pack a labelled directed-triad adjacency (over local positions `0,1,2`) into a
 /// 6-bit ordered-pair mask, independently of `rim::directed::canonical`'s bit order
@@ -4213,14 +4224,14 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// [D4] Directed graphlet census (weakly-connected, k=2..=4): class counts vs the
+// [D4] Directed graphlet census (weakly-connected, k=2..=5): class counts vs the
 // published ground truth (OEIS A003085: non-isomorphic weakly-connected digraphs on
-// n nodes = 2, 13, 199 for n=2,3,4), and vs an independent combination-based
+// n nodes = 2, 13, 199, 9364 for n=2,3,4,5), and vs an independent combination-based
 // (non-ESU) brute-force oracle over adversarial + fuzzed digraphs.
 // ---------------------------------------------------------------------------
 #[test]
 fn directed_class_counts_match_published_ground_truth() {
-    let reg = DirectedRegistry::build();
+    let reg = shared_directed_registry();
     // OEIS A003085: 1, 2, 13, 199, 9364, ... for n = 1, 2, 3, 4, 5 nodes.
     assert_eq!(
         reg.class_count(2),
@@ -4236,6 +4247,15 @@ fn directed_class_counts_match_published_ground_truth() {
         reg.class_count(4),
         199,
         "k=4 weakly-connected digraph classes"
+    );
+    // k=5 is the crux of this phase: exhaustively enumerating all 2^20 labelled
+    // digraphs (inside `DirectedRegistry::build`) must land on exactly the published
+    // 9364 weakly-connected classes. Slow (seconds) but exact — see the performance
+    // caveat in the `rim::directed` module docs.
+    assert_eq!(
+        reg.class_count(5),
+        9364,
+        "k=5 weakly-connected digraph classes"
     );
 }
 
@@ -4353,7 +4373,7 @@ fn directed_census_matches_bruteforce_oracle() {
     for (arcs, n) in directed_adversarial_battery() {
         let dm = dir_matrix_local(&arcs, n);
         let g = build_directed(&arcs, n);
-        for k in 2..=4 {
+        for k in 2..=5 {
             if k > n {
                 continue;
             }
@@ -4386,7 +4406,7 @@ proptest! {
         let arcs = dir_edges_from_bits(n.min(6), &bits[..bits.len().min(6 * 5)]);
         let dm = dir_matrix_local(&arcs, n);
         let g = build_directed(&arcs, n);
-        for k in 2..=4usize {
+        for k in 2..=5usize {
             if k > n {
                 continue;
             }
@@ -4435,7 +4455,7 @@ fn directed_gdv_oracle(dm: &[Vec<bool>], n: usize, reg: &DirectedRegistry) -> Ve
     let mut gdv = vec![vec![0u64; reg.orbit_count()]; n];
     for v in 0..n {
         let others: Vec<usize> = (0..n).filter(|&x| x != v).collect();
-        for k in 2..=4usize {
+        for k in 2..=5usize {
             for rest in combos(&others, k - 1) {
                 let mut sub = vec![v];
                 sub.extend_from_slice(&rest);
@@ -4459,15 +4479,15 @@ fn directed_gdv_oracle(dm: &[Vec<bool>], n: usize, reg: &DirectedRegistry) -> Ve
 #[test]
 #[allow(clippy::needless_range_loop)]
 fn directed_gdv_matches_bruteforce_oracle() {
-    let reg = DirectedRegistry::build();
+    let reg = shared_directed_registry();
     for (arcs, n) in directed_adversarial_battery() {
         if n > 7 {
             continue; // keep the O(n^k) oracle combination search tractable
         }
         let dm = dir_matrix_local(&arcs, n);
         let g = build_directed(&arcs, n);
-        let gdv = directed_graphlet_degree_vectors(&g, &reg);
-        let oracle = directed_gdv_oracle(&dm, n, &reg);
+        let gdv = directed_graphlet_degree_vectors(&g, reg);
+        let oracle = directed_gdv_oracle(&dm, n, reg);
         for v in 0..n {
             assert_eq!(gdv.row(v), oracle[v].as_slice(), "node {v} n={n}");
         }
@@ -4486,7 +4506,7 @@ fn directed_census_stable_under_relabelling() {
         order.shuffle(&mut rng);
         let permuted_arcs: Vec<(usize, usize)> =
             arcs.iter().map(|&(a, b)| (order[a], order[b])).collect();
-        for k in 2..=4 {
+        for k in 2..=5 {
             if k > n {
                 continue;
             }
