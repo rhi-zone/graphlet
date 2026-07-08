@@ -3901,3 +3901,605 @@ proptest! {
         }
     }
 }
+
+// ===========================================================================
+// DIRECTED (phase 7): triad census (k=3, all 16 standard types, connectivity
+// unrestricted) and the directed graphlet census/orbits (weakly-connected, k=2..=4).
+//
+// Independent-oracle strategy, mirroring the undirected precedent above
+// (`indep_mask`/`census_oracle`/`gdv_oracle` are separate re-implementations of
+// canonicalization, not calls into production code):
+//   - Triads: an oracle classifier built from canonical-mask minimization (a
+//     completely different code path than production `triad::classify`'s
+//     M/A/N-count branching), with its mask -> TriadType table populated from
+//     concrete hand-built examples matching definitions confirmed against igraph's
+//     published `triad_census` documentation (021D/U/C, 111D/U, 120D/U/C).
+//   - k=4 classes/orbits: independent combination-based (not ESU) weakly-connected
+//     enumeration, independent canonical-arg computation, cross-checked against
+//     production `count_directed`/`directed_graphlet_degree_vectors`.
+// ===========================================================================
+
+use crate::rim::directed::triad::{classify as triad_classify, triad_census, TriadType};
+use crate::rim::directed::{
+    count_directed, directed_graphlet_degree_vectors, enumerate_directed, DirectedCensus,
+    DirectedClassId, DirectedRegistry, DirectedSelector,
+};
+
+/// Pack a labelled directed-triad adjacency (over local positions `0,1,2`) into a
+/// 6-bit ordered-pair mask, independently of `rim::directed::canonical`'s bit order
+/// (fixed here as `(0,1),(1,0),(0,2),(2,0),(1,2),(2,1)`).
+fn triad_local_mask(has_arc: &impl Fn(usize, usize) -> bool) -> u64 {
+    let pairs = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)];
+    let mut m = 0u64;
+    for (b, &(i, j)) in pairs.iter().enumerate() {
+        if has_arc(i, j) {
+            m |= 1 << b;
+        }
+    }
+    m
+}
+
+/// Canonical triad mask: minimum over all 6 permutations of `{0, 1, 2}` — an
+/// independent re-derivation of directed canonicalization at k=3, not calling into
+/// `rim::directed::canonical`.
+fn triad_canonical_mask(has_arc: &impl Fn(usize, usize) -> bool) -> u64 {
+    let perms3: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    perms3
+        .iter()
+        .map(|p| triad_local_mask(&|i, j| has_arc(p[i], p[j])))
+        .min()
+        .unwrap()
+}
+
+/// Build the canonical-mask -> `TriadType` oracle lookup from concrete hand-built
+/// examples, each constructed to match a definition confirmed against igraph's
+/// published `triad_census` documentation (Holland & Leinhardt / Davis & Leinhardt
+/// naming). Independent of `triad::classify`'s structural (M/A/N + center-node)
+/// derivation: this path classifies purely by canonicalized-mask lookup.
+fn oracle_triad_table() -> HashMap<u64, TriadType> {
+    // Each entry: local arcs among positions {0, 1, 2}, and the expected type.
+    let examples: Vec<(Vec<(usize, usize)>, TriadType)> = vec![
+        (vec![], TriadType::T003),
+        (vec![(0, 1)], TriadType::T012),
+        (vec![(0, 1), (1, 0)], TriadType::T102),
+        // 021D: A <-- B --> C i.e. center B=0 diverging to A=1, C=2.
+        (vec![(0, 1), (0, 2)], TriadType::T021D),
+        // 021U: A --> B <-- C, center B=0 converging.
+        (vec![(1, 0), (2, 0)], TriadType::T021U),
+        // 021C: A --> B --> C chain.
+        (vec![(0, 1), (1, 2)], TriadType::T021C),
+        // 111D: A <-> B <-- C : mutual {0,1}, arc 2 -> 1 (into the dyad).
+        (vec![(0, 1), (1, 0), (2, 1)], TriadType::T111D),
+        // 111U: A <-> B --> C : mutual {0,1}, arc 1 -> 2 (out of the dyad).
+        (vec![(0, 1), (1, 0), (1, 2)], TriadType::T111U),
+        // 030T: transitive triangle.
+        (vec![(0, 1), (1, 2), (0, 2)], TriadType::T030T),
+        // 030C: cyclic triangle.
+        (vec![(0, 1), (1, 2), (2, 0)], TriadType::T030C),
+        // 201: two mutual dyads {0,1} and {0,2}, dyad (1,2) null.
+        (vec![(0, 1), (1, 0), (0, 2), (2, 0)], TriadType::T201),
+        // 120D: A <-- B --> C, A <-> C: center B=1 diverging to A=0,C=2; mutual {0,2}.
+        (vec![(1, 0), (1, 2), (0, 2), (2, 0)], TriadType::T120D),
+        // 120U: A --> B <-- C, A <-> C.
+        (vec![(0, 1), (2, 1), (0, 2), (2, 0)], TriadType::T120U),
+        // 120C: A --> B --> C, A <-> C.
+        (vec![(0, 1), (1, 2), (0, 2), (2, 0)], TriadType::T120C),
+        // 210: two mutual dyads {0,1},{0,2} plus asymmetric arc 1 -> 2.
+        (
+            vec![(0, 1), (1, 0), (0, 2), (2, 0), (1, 2)],
+            TriadType::T210,
+        ),
+        // 300: complete mutual triad.
+        (
+            vec![(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)],
+            TriadType::T300,
+        ),
+    ];
+    let mut table = HashMap::new();
+    for (arcs, ty) in examples {
+        let has_arc = |i: usize, j: usize| arcs.contains(&(i, j));
+        let mask = triad_canonical_mask(&has_arc);
+        let prior = table.insert(mask, ty);
+        assert!(
+            prior.is_none() || prior == Some(ty),
+            "canonical-mask collision building oracle table: {ty:?} vs {prior:?}"
+        );
+    }
+    table
+}
+
+/// Independent oracle classification of a labelled triple, via canonical-mask lookup
+/// (decorrelated from `triad::classify`'s direct structural branching).
+fn oracle_classify(
+    x: usize,
+    y: usize,
+    z: usize,
+    has_arc: impl Fn(usize, usize) -> bool,
+) -> TriadType {
+    let local = |i: usize, j: usize| {
+        let g = [x, y, z];
+        has_arc(g[i], g[j])
+    };
+    let mask = triad_canonical_mask(&local);
+    let table = oracle_triad_table();
+    table[&mask]
+}
+
+#[test]
+fn triad_oracle_table_has_exactly_16_classes() {
+    let table = oracle_triad_table();
+    assert_eq!(
+        table.len(),
+        16,
+        "expected exactly 16 distinct triad classes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [D1] Exhaustive: all 2^6 = 64 possible directed-triad adjacency patterns,
+// production `classify` vs the independent canonical-mask oracle. Also confirms the
+// 64-pattern space partitions into exactly 16 classes under either method.
+// ---------------------------------------------------------------------------
+#[test]
+fn triad_classify_matches_oracle_exhaustive() {
+    let mut prod_classes = HashSet::new();
+    let mut oracle_classes = HashSet::new();
+    for bits in 0u32..64 {
+        let pairs = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)];
+        let arcs: Vec<(usize, usize)> = pairs
+            .iter()
+            .enumerate()
+            .filter(|&(b, _)| bits & (1 << b) != 0)
+            .map(|(_, &p)| p)
+            .collect();
+        let has_arc = |i: usize, j: usize| arcs.contains(&(i, j));
+        let prod = triad_classify(0, 1, 2, has_arc);
+        let oracle = oracle_classify(0, 1, 2, has_arc);
+        assert_eq!(
+            prod, oracle,
+            "bits={bits:06b} arcs={arcs:?} production={prod:?} oracle={oracle:?}"
+        );
+        prod_classes.insert(prod);
+        oracle_classes.insert(oracle);
+    }
+    assert_eq!(prod_classes.len(), 16);
+    assert_eq!(oracle_classes.len(), 16);
+}
+
+/// Relabelling-invariance: for every one of the 64 patterns, permuting the three
+/// concrete node ids must not change the classified type (isomorphism invariance).
+#[test]
+fn triad_classify_stable_under_relabelling() {
+    let node_perms: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for bits in 0u32..64 {
+        let pairs = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)];
+        let arcs: Vec<(usize, usize)> = pairs
+            .iter()
+            .enumerate()
+            .filter(|&(b, _)| bits & (1 << b) != 0)
+            .map(|(_, &p)| p)
+            .collect();
+        let has_arc = |i: usize, j: usize| arcs.contains(&(i, j));
+        let base = triad_classify(0, 1, 2, has_arc);
+        // Classify via the permuted node-id triple, querying the same underlying
+        // pattern (has_arc unchanged) but through relabelled positions: the type must
+        // not change (isomorphism invariance).
+        for p in &node_perms {
+            let ty = triad_classify(p[0], p[1], p[2], has_arc);
+            assert_eq!(ty, base, "bits={bits:06b} perm={p:?}");
+        }
+    }
+}
+
+/// Brute-force directed triad census over every 3-subset, tallied by the independent
+/// oracle classifier — the ground truth [`triad_census`] is checked against.
+fn triad_census_oracle(dm: &[Vec<bool>], n: usize) -> HashMap<TriadType, u64> {
+    let mut out: HashMap<TriadType, u64> = HashMap::new();
+    for x in 0..n {
+        for y in (x + 1)..n {
+            for z in (y + 1)..n {
+                let ty = oracle_classify(x, y, z, |a, b| dm[a][b]);
+                *out.entry(ty).or_insert(0) += 1;
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// [D2] `triad_census` vs the independent oracle census, over adversarial + fuzzed
+// digraphs, plus the C(n,3) total check.
+// ---------------------------------------------------------------------------
+#[test]
+fn triad_census_matches_oracle_and_totals() {
+    let mut cases: Vec<(Vec<(usize, usize)>, usize)> = vec![
+        (vec![], 5),            // empty
+        (path_edges(6), 6),     // directed path
+        (cycle_edges(5), 5),    // directed cycle
+        (star_edges(6), 6),     // out-star
+        (complete_edges(5), 5), // tournament-ish (one-way)
+        // A tournament: every pair has exactly one arc.
+        (
+            (0..5)
+                .flat_map(|i| ((i + 1)..5).map(move |j| (i, j)))
+                .collect(),
+            5,
+        ),
+        // Bidirectional (every edge mutual) small graph.
+        {
+            let mut e = path_edges(5);
+            e.extend(path_edges(5).into_iter().map(|(a, b)| (b, a)));
+            (e, 5)
+        },
+    ];
+    for seed in 0..10u64 {
+        let n = 5 + (seed as usize % 4);
+        let mut e = random_edges(n, 0.3, seed)
+            .into_iter()
+            .map(|(a, b)| if seed % 2 == 0 { (a, b) } else { (b, a) })
+            .collect::<Vec<_>>();
+        // Add some reciprocal arcs at random to exercise mutual dyads.
+        let mut rng = StdRng::seed_from_u64(seed + 1000);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if rng.gen::<f64>() < 0.15 {
+                    e.push((i, j));
+                    e.push((j, i));
+                }
+            }
+        }
+        cases.push((e, n));
+    }
+
+    for (arcs, n) in &cases {
+        let g = build_directed(arcs, *n);
+        let dm = dir_matrix(arcs, *n);
+        // Symmetrize a lookup for the oracle: dm already directed (dm[a][b] iff arc
+        // a->b); triad_census_oracle only needs directed lookups.
+        let oracle = triad_census_oracle(&dm, *n);
+        let census = triad_census(&g);
+
+        for ty in TriadType::all() {
+            let expect = oracle.get(&ty).copied().unwrap_or(0);
+            assert_eq!(
+                census.get(ty),
+                expect,
+                "triad type {} mismatch, n={n}",
+                ty.label()
+            );
+        }
+        let total_expected = (*n * (*n - 1) * (*n - 2) / 6) as u64;
+        assert_eq!(census.total(), total_expected, "total triads, n={n}");
+        assert_eq!(
+            oracle.values().sum::<u64>(),
+            total_expected,
+            "oracle total triads, n={n}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(150))]
+
+    /// [D3] `triad_census` vs the independent oracle, as a proptest over fuzzed
+    /// directed adjacency (arbitrary arc-presence bits, n=0..=7).
+    #[test]
+    fn prop_triad_census_matches_oracle((n, bits) in dir_graph_strategy()) {
+        let arcs = dir_edges_from_bits(n, &bits);
+        let dm = dir_matrix(&arcs, n);
+        let g = build_directed(&arcs, n);
+        let oracle = triad_census_oracle(&dm, n);
+        let census = triad_census(&g);
+        for ty in TriadType::all() {
+            prop_assert_eq!(census.get(ty), oracle.get(&ty).copied().unwrap_or(0), "type {}", ty.label());
+        }
+        let total_expected = (n * n.saturating_sub(1) * n.saturating_sub(2) / 6) as u64;
+        prop_assert_eq!(census.total(), total_expected);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [D4] Directed graphlet census (weakly-connected, k=2..=4): class counts vs the
+// published ground truth (OEIS A003085: non-isomorphic weakly-connected digraphs on
+// n nodes = 2, 13, 199 for n=2,3,4), and vs an independent combination-based
+// (non-ESU) brute-force oracle over adversarial + fuzzed digraphs.
+// ---------------------------------------------------------------------------
+#[test]
+fn directed_class_counts_match_published_ground_truth() {
+    let reg = DirectedRegistry::build();
+    // OEIS A003085: 1, 2, 13, 199, 9364, ... for n = 1, 2, 3, 4, 5 nodes.
+    assert_eq!(
+        reg.class_count(2),
+        2,
+        "k=2 weakly-connected digraph classes"
+    );
+    assert_eq!(
+        reg.class_count(3),
+        13,
+        "k=3 weakly-connected digraph classes"
+    );
+    assert_eq!(
+        reg.class_count(4),
+        199,
+        "k=4 weakly-connected digraph classes"
+    );
+}
+
+/// Independent directed adjacency matrix built straight from an arc list (decorrelated
+/// from `DirectedSnapshot`).
+fn dir_matrix_local(arcs: &[(usize, usize)], n: usize) -> Vec<Vec<bool>> {
+    let mut m = vec![vec![false; n]; n];
+    for &(a, b) in arcs {
+        if a != b {
+            m[a][b] = true;
+        }
+    }
+    m
+}
+
+/// Whether `sub` (global indices) is weakly connected in `dm` (independent of
+/// `rim::directed::canonical::weakly_connected`).
+fn dir_sub_weakly_connected(dm: &[Vec<bool>], sub: &[usize]) -> bool {
+    let k = sub.len();
+    let mut und = vec![Vec::new(); k];
+    for i in 0..k {
+        for j in 0..k {
+            if i != j && (dm[sub[i]][sub[j]] || dm[sub[j]][sub[i]]) {
+                und[i].push(j);
+            }
+        }
+    }
+    connected(&und)
+}
+
+/// Independent canonical directed mask (min over k! permutations of the ordered-pair
+/// bitmask), computed straight from the adjacency matrix.
+fn indep_directed_mask(dm: &[Vec<bool>], sub: &[usize]) -> u64 {
+    let k = sub.len();
+    let mut best = u64::MAX;
+    for p in &perms(k) {
+        let mut mask = 0u64;
+        let mut bit = 0u32;
+        for i in 0..k {
+            for j in 0..k {
+                if i != j {
+                    if dm[sub[p[i]]][sub[p[j]]] {
+                        mask |= 1 << bit;
+                    }
+                    bit += 1;
+                }
+            }
+        }
+        best = best.min(mask);
+    }
+    best
+}
+
+/// Independent directed census oracle: combination enumeration (not ESU), decorrelated
+/// canonicalization.
+fn directed_census_oracle(dm: &[Vec<bool>], n: usize, k: usize) -> HashMap<u64, u64> {
+    let mut out: HashMap<u64, u64> = HashMap::new();
+    if k > n {
+        return out;
+    }
+    let pool: Vec<usize> = (0..n).collect();
+    for sub in combos(&pool, k) {
+        if dir_sub_weakly_connected(dm, &sub) {
+            *out.entry(indep_directed_mask(dm, &sub)).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+fn directed_adversarial_battery() -> Vec<(Vec<(usize, usize)>, usize)> {
+    let mut hosts: Vec<(Vec<(usize, usize)>, usize)> = Vec::new();
+    for n in [4usize, 5, 6] {
+        hosts.push((path_edges(n), n)); // directed path
+        hosts.push((cycle_edges(n), n)); // directed cycle
+        hosts.push((star_edges(n), n)); // out-star
+                                        // Reversed star (in-star).
+        hosts.push((star_edges(n).into_iter().map(|(a, b)| (b, a)).collect(), n));
+        // Tournament (every pair one arc).
+        hosts.push((
+            (0..n)
+                .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+                .collect(),
+            n,
+        ));
+        // Fully bidirectional (every undirected edge -> both arcs): path + cycle mix.
+        let mut bidir = path_edges(n);
+        bidir.extend(path_edges(n).into_iter().map(|(a, b)| (b, a)));
+        hosts.push((bidir, n));
+        // DAG: every edge i -> j for i < j (transitive tournament orientation, dense).
+        hosts.push((
+            (0..n)
+                .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+                .collect(),
+            n,
+        ));
+    }
+    for seed in 0..10u64 {
+        let n = 5 + (seed as usize % 3);
+        let mut e: Vec<(usize, usize)> = Vec::new();
+        let mut rng = StdRng::seed_from_u64(seed + 2000);
+        for i in 0..n {
+            for j in 0..n {
+                if i != j && rng.gen::<f64>() < 0.25 {
+                    e.push((i, j));
+                }
+            }
+        }
+        hosts.push((e, n));
+    }
+    hosts
+}
+
+#[test]
+fn directed_census_matches_bruteforce_oracle() {
+    for (arcs, n) in directed_adversarial_battery() {
+        let dm = dir_matrix_local(&arcs, n);
+        let g = build_directed(&arcs, n);
+        for k in 2..=4 {
+            if k > n {
+                continue;
+            }
+            let sel = DirectedSelector::weakly_connected_k_subsets(k);
+            let census: DirectedCensus = count_directed(&g, &sel);
+            let oracle = directed_census_oracle(&dm, n, k);
+
+            let by_mask: HashMap<u64, u64> = census.iter().map(|(c, &v)| (c.0, v)).collect();
+            assert_eq!(by_mask, oracle, "census vs oracle n={n} k={k}");
+
+            // enumerate_directed must agree with count_directed instance-for-instance.
+            let insts: Vec<_> = enumerate_directed(&g, &sel).collect();
+            let mut by_iter: HashMap<u64, u64> = HashMap::new();
+            for inst in &insts {
+                *by_iter.entry(inst.class.0).or_insert(0) += 1;
+                assert_eq!(inst.nodes.len(), k);
+            }
+            assert_eq!(by_iter, oracle, "enumerate vs oracle n={n} k={k}");
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// [D5] Directed census vs the independent combination-based oracle, as a
+    /// proptest over fuzzed directed adjacency (n = 0..=6).
+    #[test]
+    fn prop_directed_census_matches_oracle((n, bits) in dir_graph_strategy()) {
+        let arcs = dir_edges_from_bits(n.min(6), &bits[..bits.len().min(6 * 5)]);
+        let dm = dir_matrix_local(&arcs, n);
+        let g = build_directed(&arcs, n);
+        for k in 2..=4usize {
+            if k > n {
+                continue;
+            }
+            let sel = DirectedSelector::weakly_connected_k_subsets(k);
+            let census: DirectedCensus = count_directed(&g, &sel);
+            let oracle = directed_census_oracle(&dm, n, k);
+            let by_mask: HashMap<u64, u64> = census.iter().map(|(c, &v)| (c.0, v)).collect();
+            prop_assert_eq!(by_mask, oracle, "n={} k={}", n, k);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [D6] Directed per-node orbits (GDV) vs an independent combination-based oracle
+// (decorrelated enumeration + canonicalization; trusts the once-built
+// `DirectedRegistry`'s orbit partition, exactly as the undirected `gdv_oracle`
+// precedent trusts `Registry::slot_map`).
+// ---------------------------------------------------------------------------
+fn indep_directed_canonical_arg(dm: &[Vec<bool>], sub: &[usize]) -> (u64, Vec<usize>) {
+    let k = sub.len();
+    let mut best = u64::MAX;
+    let mut arg = (0..k).collect::<Vec<usize>>();
+    for p in &perms(k) {
+        let mut mask = 0u64;
+        let mut bit = 0u32;
+        for i in 0..k {
+            for j in 0..k {
+                if i != j {
+                    if dm[sub[p[i]]][sub[p[j]]] {
+                        mask |= 1 << bit;
+                    }
+                    bit += 1;
+                }
+            }
+        }
+        if mask < best {
+            best = mask;
+            arg = p.clone();
+        }
+    }
+    (best, arg)
+}
+
+#[allow(clippy::needless_range_loop)]
+fn directed_gdv_oracle(dm: &[Vec<bool>], n: usize, reg: &DirectedRegistry) -> Vec<Vec<u64>> {
+    let mut gdv = vec![vec![0u64; reg.orbit_count()]; n];
+    for v in 0..n {
+        let others: Vec<usize> = (0..n).filter(|&x| x != v).collect();
+        for k in 2..=4usize {
+            for rest in combos(&others, k - 1) {
+                let mut sub = vec![v];
+                sub.extend_from_slice(&rest);
+                if !dir_sub_weakly_connected(dm, &sub) {
+                    continue;
+                }
+                let (class, arg) = indep_directed_canonical_arg(dm, &sub);
+                let slotmap = reg.slot_map(k, class);
+                for (c, &slot) in slotmap.iter().enumerate() {
+                    if sub[arg[c]] == v {
+                        gdv[v][slot] += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    gdv
+}
+
+#[test]
+#[allow(clippy::needless_range_loop)]
+fn directed_gdv_matches_bruteforce_oracle() {
+    let reg = DirectedRegistry::build();
+    for (arcs, n) in directed_adversarial_battery() {
+        if n > 7 {
+            continue; // keep the O(n^k) oracle combination search tractable
+        }
+        let dm = dir_matrix_local(&arcs, n);
+        let g = build_directed(&arcs, n);
+        let gdv = directed_graphlet_degree_vectors(&g, &reg);
+        let oracle = directed_gdv_oracle(&dm, n, &reg);
+        for v in 0..n {
+            assert_eq!(gdv.row(v), oracle[v].as_slice(), "node {v} n={n}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [D7] Stability under relabelling (directed): permuting node identity must not
+// change the multiset of classes in the census, nor the multiset of GDV rows.
+// ---------------------------------------------------------------------------
+#[test]
+fn directed_census_stable_under_relabelling() {
+    let mut rng = StdRng::seed_from_u64(4242);
+    for (arcs, n) in directed_adversarial_battery() {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.shuffle(&mut rng);
+        let permuted_arcs: Vec<(usize, usize)> =
+            arcs.iter().map(|&(a, b)| (order[a], order[b])).collect();
+        for k in 2..=4 {
+            if k > n {
+                continue;
+            }
+            let sel = DirectedSelector::weakly_connected_k_subsets(k);
+            let g1 = build_directed(&arcs, n);
+            let g2 = build_directed(&permuted_arcs, n);
+            let mut c1: Vec<(DirectedClassId, u64)> =
+                count_directed(&g1, &sel).into_iter().collect();
+            let mut c2: Vec<(DirectedClassId, u64)> =
+                count_directed(&g2, &sel).into_iter().collect();
+            c1.sort_by_key(|(c, _)| c.0);
+            c2.sort_by_key(|(c, _)| c.0);
+            assert_eq!(c1, c2, "census must be relabelling-invariant, n={n} k={k}");
+        }
+    }
+}
