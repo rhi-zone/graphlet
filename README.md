@@ -1,6 +1,7 @@
 # graphlet
 
-`graphlet` is a Rust library for graphlet and network-motif mining on top of
+`graphlet` is a Rust library for [graphlet](https://en.wikipedia.org/wiki/Graphlets) and
+[network-motif](https://en.wikipedia.org/wiki/Network_motif) mining on top of
 [petgraph](https://docs.rs/petgraph): it counts and enumerates small connected
 subgraphs, attributes nodes to their graphlet orbits, finds and tests the
 significance of named motifs, matches arbitrary template patterns, generates
@@ -11,8 +12,6 @@ motif-level detail that the rest of the Rust graph ecosystem does not provide.
 It depends only on `petgraph` and `rand`, and works directly on `Graph`,
 `StableGraph`, and `DiGraph`, directed or undirected, with any node/edge
 weights.
-
-Documentation lives at <https://docs.rhi.zone/graphlet/>.
 
 ## At a glance
 
@@ -90,7 +89,8 @@ predicates and directedness:
 
 - **Induced** (`induced_matches`): delegates to petgraph's own VF2
   (`subgraph_isomorphisms_iter`).
-- **Non-induced / monomorphism** (`monomorphisms`): this crate's own
+- **Non-induced / [monomorphism](https://en.wikipedia.org/wiki/Subgraph_isomorphism_problem)**
+  (`monomorphisms`): this crate's own
   ordered-backtracking, edge-preserving enumerator (petgraph has no
   monomorphism search).
 
@@ -100,9 +100,12 @@ separately); divide by `|Aut(pattern)|` for distinct occurrences.
 ### Null-model generators (`rim::null_model`)
 
 Random-graph generators for significance testing, each seeded via `&mut impl
-Rng`: the configuration model (raw and simple/loop-free variants), degree-preserving
-double-edge-swap rewiring, Watts-Strogatz small-world graphs, and an LFR
-benchmark graph with planted community structure. LFR is a documented partial:
+Rng`: the [configuration model](https://en.wikipedia.org/wiki/Configuration_model) (raw
+and simple/loop-free variants), degree-preserving double-edge-swap rewiring,
+[Watts-Strogatz](https://en.wikipedia.org/wiki/Watts%E2%80%93Strogatz_model) small-world
+graphs, and an
+[LFR benchmark](https://en.wikipedia.org/wiki/Lancichinetti%E2%80%93Fortunato%E2%80%93Radicchi_benchmark)
+graph with planted community structure. LFR is a documented partial:
 it approximates the target degree and mixing parameters rather than enforcing
 them exactly, and has other known deviations from the reference algorithm
 (see its doc comment).
@@ -119,17 +122,22 @@ a `NaN`.
 
 ### Neighborhood statistics (`rim::neighborhood`)
 
-Link-prediction indices (common neighbors, Jaccard, Adamic-Adar, resource
-allocation, preferential attachment), local/average/global clustering
-coefficients with triangle counting, degree assortativity (Newman/Pearson),
-and the rich-club coefficient.
+[Link-prediction](https://en.wikipedia.org/wiki/Link_prediction) indices (common
+neighbors, Jaccard, Adamic-Adar, resource allocation, preferential attachment),
+local/average/global
+[clustering coefficients](https://en.wikipedia.org/wiki/Clustering_coefficient) with
+triangle counting,
+[degree assortativity](https://en.wikipedia.org/wiki/Assortativity) (Newman/Pearson),
+and the [rich-club coefficient](https://en.wikipedia.org/wiki/Rich-club_coefficient).
 
-### Graph kernels (`rim::kernels`)
+### [Graph kernels](https://en.wikipedia.org/wiki/Graph_kernel) (`rim::kernels`)
 
 A graphlet kernel (built directly from the census substrate's own class-count
-vectors), a Weisfeiler-Lehman subtree kernel, a shortest-path kernel, and a
-generic Gram-matrix builder (raw or cosine-normalized) usable with any of the
-three feature representations, or your own.
+vectors), a
+[Weisfeiler-Lehman](https://en.wikipedia.org/wiki/Weisfeiler_Leman_graph_isomorphism_test)
+subtree kernel, a [shortest-path](https://en.wikipedia.org/wiki/Shortest_path_problem)
+kernel, and a generic Gram-matrix builder (raw or cosine-normalized) usable with any of
+the three feature representations, or your own.
 
 ### Directed graphlets (`rim::directed`)
 
