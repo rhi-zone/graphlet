@@ -1,25 +1,20 @@
 # graphlet
 
-A petgraph-native Rust library for graphlet analysis of undirected simple graphs. It
-computes:
-
-- the connected induced-subgraph census (each connected induced subgraph up to 5 nodes,
-  folded by canonical isomorphism class),
-- per-node graphlet degree vectors and their distribution (GDV / GDD) across all 73
-  orbits of the graphlets up to 5 nodes,
-- a named-motif catalog (paths, cycles, stars, complete graphs, the six connected 4-node
-  motifs, the diamond, plus a registry for arbitrary user patterns), with general
-  `find_motif` / `count_motif` queries reporting both induced and non-induced occurrences,
-- template matching of arbitrary graphs — induced via petgraph's VF2, and non-induced
-  (subgraph monomorphism) via this crate's own directed/undirected enumerator with
-  node/edge match predicates.
-
-It runs directly on petgraph's own types, generic over `Graph` and `StableGraph`, so it
-reads the graph you already have. It depends only on `petgraph` and `rand`.
+`graphlet` is a Rust library for graphlet and network-motif mining on top of
+[petgraph](https://docs.rs/petgraph): it counts and enumerates small connected
+subgraphs, attributes nodes to their graphlet orbits, finds and tests the
+significance of named motifs, matches arbitrary template patterns, generates
+null-model random graphs, and computes a few structural graph statistics
+(clustering, assortativity, link prediction, graph kernels). It is for anyone
+doing structural/network-science analysis on a petgraph graph who needs
+motif-level detail that the rest of the Rust graph ecosystem does not provide.
+It depends only on `petgraph` and `rand`, and works directly on `Graph`,
+`StableGraph`, and `DiGraph`, directed or undirected, with any node/edge
+weights.
 
 Documentation lives at <https://docs.rhi.zone/graphlet/>.
 
-## Example
+## At a glance
 
 ```rust
 use graphlet::catalog::{find_diamonds, Induced};
@@ -47,57 +42,203 @@ assert_eq!(find_diamonds(&g, Induced::Yes).len(), 1);
 
 ## What it does
 
-- Enumerates and counts connected induced subgraphs (the subgraph census), assigning
-  each a canonical isomorphism-class label so structurally identical subgraphs fold
-  together regardless of node numbering. `enumerate` yields instances lazily; `count`
-  streams the same traversal into per-class counts.
-- Computes per-node graphlet degree vectors (GDV) and the graphlet degree distribution
-  (GDD) across all 73 orbits.
-- Provides a named-motif catalog (`Pattern::path`/`cycle`/`star`/`complete`/`paw`/`claw`/
-  `diamond`, a `MotifCatalog` registry for arbitrary patterns) and general `find_motif` /
-  `count_motif` queries. Induced counts are read off the census; non-induced counts are
-  derived from the induced census through a fixed conversion table (not a separate
-  enumerator); instances are enumerated by the pattern-instance engine and deduped to
-  distinct occurrences. `find_diamonds` is a thin wrapper over `find_motif`.
-- Matches arbitrary user-supplied template graphs, in two semantics: induced subgraph
-  isomorphism (petgraph's VF2 `subgraph_isomorphisms_iter`) and non-induced subgraph
-  monomorphism (an ordered-backtracking enumerator owning this crate's own code, for
-  directed and undirected graphs, with node/edge match predicates).
+### Subgraph census
 
-## Scope
+The organizing center of the crate is a single pipeline: enumerate every
+connected induced subgraph up to 5 nodes, label it by canonical isomorphism
+class, and fold. `enumerate` yields each match lazily as an `Instance`
+(the host node ids plus its class); `count` folds the same traversal into a
+`Census` (class to count) whose memory tracks graph size, not the number of
+matches. Both are generic over `Graph`, `StableGraph`, and `DiGraph`; the
+underlying structure is always treated as simple and undirected (self-loops
+stripped, parallel edges deduped, directed edges unioned).
 
-- Undirected simple graphs. Self-loops are ignored and parallel edges are deduplicated.
-  Directed input is analyzed on its underlying undirected structure.
-- Subgraph size up to 5 nodes.
-- Generic over petgraph's `Graph` and `StableGraph`, over directed and undirected graphs,
-  and over arbitrary node and edge weights.
+### Graphlet degree vectors (GDV/GDD)
 
-## What it does not do
+`graphlet_degree_vectors` attributes every node of every matched subgraph to
+its automorphism orbit within that subgraph, producing the 73-entry
+graphlet-degree vector per node, for graphlets of order 2 through 5. A
+`Registry` computes the orbit structure once and is reused across calls.
 
-- No directed motifs beyond triads (no directed graphlets at k >= 4).
-- No statistical significance testing (no z-scores of observed counts).
-- No null-model generators.
-- No graph kernels.
-- No neighborhood statistics (link prediction, assortativity, rich-club coefficients).
-- The 5-node census uses naive canonicalization and is not tuned for very large graphs,
-  so it is slow on big inputs.
-- The named-motif catalog (`Pattern`, `find_motif` / `count_motif`) is bounded to k <= 5;
-  larger or weighted arbitrary templates are matched through the `template` engine directly.
+The exact path canonicalizes every subgraph instance, which gets expensive at
+k=5. `rim::scalable::fast_graphlet_degree_vectors` recovers the same 73-orbit
+result an ORCA-style way, without ever canonically labelling a connected
+5-node subset: it counts degrees, per-edge triangles, and per-vertex K4
+memberships directly for orders 2 through 4, and decomposes order-5 orbits
+through connected 4-node cores plus attachment tallies. It is verified exact,
+node-for-node and count-for-count, against the exact census path across a
+battery of standard graphs (paths, cycles, stars, complete graphs, wheels,
+trees, complete bipartite graphs, the Petersen graph, the cube graph Q3) plus
+fuzzed random graphs, and runs roughly two orders of magnitude faster on
+larger or denser graphs.
 
-## What to use instead
+### Named motifs
 
-- petgraph: core graph algorithms, and VF2 subgraph isomorphism itself.
-- rustworkx-core: a broad algorithm suite (shortest paths, centrality, DAG operations,
-  generators).
-- graphalgs: spectral and distance-based metrics.
-- triadic-census: directed triad census.
-- heterogeneous_graphlets: graphlets on heterogeneous graphs.
-- ORCA and FANMOD (not Rust): mature references for orbit counting at scale and for motif
-  significance testing.
+`catalog` provides named `Pattern` constructors for the standard small
+motifs, path (`P_k`), cycle (`C_k`), star, complete graph (`K_k`), triangle,
+claw, paw, diamond, plus a `MotifCatalog` to register and look up arbitrary
+patterns by name. `count_pattern` / `count_motif` count any connected pattern
+of order up to 5 against a host graph, in both induced and non-induced
+semantics; `find_motif` returns the actual node-set occurrences (`find_diamonds`
+is a thin wrapper over `find_motif` for the diamond pattern).
+
+### Template matching
+
+`template` matches an arbitrary petgraph query graph against a host graph, in
+two distinct semantics, unbounded in pattern size and honoring node/edge
+predicates and directedness:
+
+- **Induced** (`induced_matches`): delegates to petgraph's own VF2
+  (`subgraph_isomorphisms_iter`).
+- **Non-induced / monomorphism** (`monomorphisms`): this crate's own
+  ordered-backtracking, edge-preserving enumerator (petgraph has no
+  monomorphism search).
+
+Both return raw embeddings (every automorphism of the pattern counted
+separately); divide by `|Aut(pattern)|` for distinct occurrences.
+
+### Null-model generators (`rim::null_model`)
+
+Random-graph generators for significance testing, each seeded via `&mut impl
+Rng`: the configuration model (raw and simple/loop-free variants), degree-preserving
+double-edge-swap rewiring, Watts-Strogatz small-world graphs, and an LFR
+benchmark graph with planted community structure. LFR is a documented partial:
+it approximates the target degree and mixing parameters rather than enforcing
+them exactly, and has other known deviations from the reference algorithm
+(see its doc comment).
+
+### Significance testing (`rim::significance`)
+
+`motif_significance` and `census_significance_profile` compare an observed
+motif count, or the full graphlet census, against an ensemble of null graphs,
+reporting a z-score and an empirical p-value per target. The significance
+profile's normalized (unit-length) vector is `None` whenever any z-score in
+the profile is non-finite (which happens when a null model's count has zero
+variance but disagrees with the observed count) rather than silently leaking
+a `NaN`.
+
+### Neighborhood statistics (`rim::neighborhood`)
+
+Link-prediction indices (common neighbors, Jaccard, Adamic-Adar, resource
+allocation, preferential attachment), local/average/global clustering
+coefficients with triangle counting, degree assortativity (Newman/Pearson),
+and the rich-club coefficient.
+
+### Graph kernels (`rim::kernels`)
+
+A graphlet kernel (built directly from the census substrate's own class-count
+vectors), a Weisfeiler-Lehman subtree kernel, a shortest-path kernel, and a
+generic Gram-matrix builder (raw or cosine-normalized) usable with any of the
+three feature representations, or your own.
+
+### Directed graphlets (`rim::directed`)
+
+A directed generalization of the census/orbit substrate, respecting arc
+direction throughout (two directed graphlets that fold to the same undirected
+class, such as `a -> b -> c` and `a -> b <- c`, are distinct directed
+classes): directed graphlet census, per-node directed orbits, for
+weakly-connected subgraphs of order 2 through 5, plus the standard 16-type
+Holland-Leinhardt directed triad census (order 3, every 3-subset, connected or
+not). k=5 is exact but slow: canonicalizing a directed 5-node instance costs
+5! permutations of a 20-bit mask, and building the order-5 registry sweeps all
+2^20 labelled digraphs once.
+
+## Examples
+
+### Census and graphlet degree vectors
+
+```rust
+use graphlet::{count, graphlet_degree_vectors, Registry, Selector};
+use petgraph::graph::UnGraph;
+
+// A 5-cycle.
+let g: UnGraph<(), ()> = UnGraph::from_edges([(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)]);
+
+let census = count(&g, &Selector::connected_k_subsets(3));
+// Every 3-subset of a 5-cycle is a path, never a triangle.
+assert_eq!(census.len(), 1);
+
+let reg = Registry::build();
+let gdv = graphlet_degree_vectors(&g, &reg);
+// Every node of a symmetric cycle sits in the same orbit for every orbit id.
+let row0 = gdv.row(0).to_vec();
+for v in 1..5 {
+    assert_eq!(gdv.row(v), row0.as_slice());
+}
+```
+
+### Motif significance against a null model
+
+```rust
+use graphlet::catalog::{Induced, Pattern};
+use graphlet::rim::significance::{motif_significance, NullModel};
+use petgraph::graph::UnGraph;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+
+// Five disjoint triangles: over-represented relative to a degree-preserving
+// null (which breaks triangles up into larger cycles).
+let g: UnGraph<(), ()> = UnGraph::from_edges([
+    (0u32, 1), (1, 2), (2, 0),
+    (3, 4), (4, 5), (5, 3),
+    (6, 7), (7, 8), (8, 6),
+    (9, 10), (10, 11), (11, 9),
+    (12, 13), (13, 14), (14, 12),
+]);
+let mut rng = StdRng::seed_from_u64(42);
+let tri = Pattern::triangle();
+let results = motif_significance(
+    &g,
+    &[("triangle", &tri, Induced::Yes)],
+    40,
+    NullModel::DegreePreserving { n_swaps_per_edge: 10 },
+    &mut rng,
+);
+let (_name, entry) = &results[0];
+assert!(entry.z_score > 0.0, "triangles should be over-represented");
+```
+
+### Graphlet kernel between two graphs
+
+```rust
+use graphlet::rim::kernels::{graphlet_features, graphlet_kernel_cosine};
+use petgraph::graph::UnGraph;
+
+let triangle: UnGraph<(), ()> = UnGraph::from_edges([(0, 1), (1, 2), (2, 0)]);
+let path: UnGraph<(), ()> = UnGraph::from_edges([(0, 1), (1, 2)]);
+
+let ft = graphlet_features(&triangle, 3);
+let fp = graphlet_features(&path, 3);
+// Different classes at k=3, so they share no graphlet-class counts.
+assert_eq!(graphlet_kernel_cosine(&ft, &fp), 0.0);
+```
+
+## Scope, and what this is not
+
+- The census, orbit, catalog, and kernel machinery treats every input as a
+  *simple undirected* graph: self-loops are stripped, parallel edges (and
+  directed reciprocal pairs) are deduped, and directed input is analyzed on
+  its underlying undirected structure. Only `rim::directed` and the triad
+  census respect arc direction.
+- Graphlets and orbits are bounded to order 5 (k <= 5); this is where the
+  "science-facing" surface (GDV/GDD, orbits, the named-motif catalog) is
+  closed. The `template` module has no such bound and matches patterns of any
+  size, at the cost of being a search rather than a closed-form count.
+- Exact k=5 enumeration (both the undirected census/orbit path and the
+  directed graphlet census) is slow on large or dense graphs: canonicalizing
+  each instance costs up to `k!` permutations. The fast ORCA-style path
+  (`rim::scalable`) covers only undirected orbit counting; there is no
+  equivalent fast path yet for the directed side or for k > 5.
+- This is a structural-mining / graphlet library, not a general graph-algorithms
+  toolkit. It has no shortest paths, no centrality measures, no flow
+  algorithms, and no general isomorphism beyond what the census/template
+  machinery needs. For those, use `petgraph` directly (which also provides the
+  VF2 isomorphism search this crate builds on) or `rustworkx-core` for a
+  broader algorithm suite.
 
 ## Install
 
-`graphlet` is not yet published to crates.io, so depend on it by git for now:
+`graphlet` is not published to crates.io, so depend on it by git:
 
 ```toml
 [dependencies]
