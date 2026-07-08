@@ -1,14 +1,14 @@
 //! The directed census spine: enumerate weakly-connected k-subsets, label by directed
 //! adjacency, fold.
 //!
-//! Structurally this mirrors [`crate::census`] exactly — ESU (Wernicke 2006) drives
+//! Structurally this mirrors the crate's internal undirected census module exactly — ESU (Wernicke 2006) drives
 //! the traversal — but two things change: connectivity is checked against the
 //! *undirected union* of arcs (a subset only needs to be weakly connected), while class
 //! labelling uses the *directed* arc relation (so `a -> b` and `b -> a` are distinct).
-//! Capped at `k <= 5` ([`MAX_K`]): `k = 3` for the (connected-only) directed-triad
+//! Capped at `k <= 5` ([`MAX_K`](crate::rim::directed::MAX_K)): `k = 3` for the (connected-only) directed-triad
 //! graphlet, `k in 4..=5` for the directed graphlet census; the full 16-type triad
 //! census (including disconnected types) lives separately in
-//! [`crate::rim::directed::triad`].
+//! [`triad`](crate::rim::directed::triad).
 
 use std::collections::HashMap;
 
@@ -17,12 +17,13 @@ use super::snapshot::{DirectedGraphAdapter, DirectedSnapshot};
 use crate::canonical::perms;
 
 /// The largest supported directed-graphlet order (see module docs for why this is
-/// smaller than the undirected [`crate::census::MAX_K`]: canonicalization still
+/// smaller than the undirected crate's own internal `MAX_K` (currently `11`):
+/// canonicalization still
 /// exhausts `k!` permutations, but the mask now needs `k(k-1)` bits instead of
 /// `k(k-1)/2`, and — more binding — the automorphism/orbit registry enumerates all
 /// `2^(k(k-1))` labelled digraphs once at build time. That sweep is `2^20` masks at
 /// `k = 5` (still exact, but slow — seconds, not microseconds — to build the
-/// [`crate::rim::directed::orbit::DirectedRegistry`]); `k = 6` would need `2^30` and is
+/// [`DirectedRegistry`](crate::rim::directed::DirectedRegistry)); `k = 6` would need `2^30` and is
 /// out of scope).
 pub const MAX_K: usize = 5;
 

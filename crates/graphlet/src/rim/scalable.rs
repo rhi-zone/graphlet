@@ -2,7 +2,7 @@
 //! full per-node graphlet-degree vector over all 73 orbits (graphlets of order
 //! `2..=5`) from directly-observable local structure, **without ever enumerating or
 //! canonically labelling a connected 5-subset** — the expensive `k!`-permutation
-//! canonicalization the exact [`graphlet_degree_vectors`] pays per instance.
+//! canonicalization the exact [`graphlet_degree_vectors`](crate::graphlet_degree_vectors) pays per instance.
 //!
 //! **Two ORCA-family layers, both clean-room from the published mathematics** (derived
 //! and verified against this crate's own exact oracle — no code, variable structure, or
@@ -32,12 +32,12 @@
 //! exact census node-for-node and count-for-count. A wrong coefficient is a bug to fix,
 //! not a trade-off to ship.
 //!
-//! The output uses the crate's own global orbit ids (from [`Registry`]) — never a
+//! The output uses the crate's own global orbit ids (from [`Registry`](crate::Registry)) — never a
 //! hardcoded assumption — so column `id` of the fast table always means the same orbit
-//! as column `id` of the exact [`GdvTable`]. For the `0..=14` prefix the bijection from
+//! as column `id` of the exact [`GdvTable`](crate::GdvTable). For the `0..=14` prefix the bijection from
 //! this module's raw (arbitrarily-ordered) equation output to those ids is discovered
 //! once, empirically, against a battery of small representative graphlets; for the
-//! order-5 block the ids come straight from [`Registry`]'s own canonical labelling of
+//! order-5 block the ids come straight from [`Registry`](crate::Registry)'s own canonical labelling of
 //! the reconstructed graphlet, so a mismatch fails loudly (a panic or an oracle
 //! disagreement) rather than silently mislabelling a column.
 
@@ -559,8 +559,14 @@ fn five_node_orbit_counts<N: Copy>(
     for row in &mut acc {
         for (id, cell) in row.iter_mut().enumerate().take(total).skip(FIVE_ORBIT_LO) {
             let m = ft.mult[id];
-            debug_assert!(m >= 1, "order-5 orbit {id} has zero core multiplicity");
-            debug_assert!(
+            // Unconditional: these are correctness invariants of the ORCA-style
+            // decomposition (exact divisibility before the integer division), not a
+            // per-edge hot-loop check (this runs once per orbit per node, O(n * 73)
+            // total) — a violation means a wrong coefficient produced a silently
+            // truncated, wrong-but-plausible count, which for a counting library must
+            // fail loud in release too, not just in debug builds.
+            assert!(m >= 1, "order-5 orbit {id} has zero core multiplicity");
+            assert!(
                 *cell % m == 0,
                 "order-5 orbit {id} accumulated {} not divisible by multiplicity {m}: a bug",
                 *cell
@@ -575,7 +581,7 @@ fn five_node_orbit_counts<N: Copy>(
 /// order `2..=5`), without enumerating or canonically labelling a connected 5-subset.
 ///
 /// The returned [`GdvTable::orbit_count`] is [`Registry::orbit_count`] (73); column
-/// `id` means the same orbit as column `id` of the exact [`graphlet_degree_vectors`],
+/// `id` means the same orbit as column `id` of the exact [`graphlet_degree_vectors`](crate::graphlet_degree_vectors),
 /// so the two tables are directly comparable in full.
 ///
 /// `g` is treated as a *simple undirected* graph, matching every other entry point in
@@ -599,11 +605,17 @@ where
 
     for (i, row) in rows.iter_mut().enumerate() {
         for (raw_idx, &id) in map.iter().enumerate() {
-            debug_assert!(
-                raw[i][raw_idx] >= 0,
+            // Unconditional: a negative derived count means a wrong ORCA coefficient
+            // silently miscounted, not a genuine possibility under correct math. This
+            // runs once per (node, mapped orbit) — O(n * 15), not a per-edge inner
+            // loop — so the check is essentially free; a counting library must panic
+            // on this in release, not clamp to a wrong-but-nonnegative value.
+            let v = raw[i][raw_idx];
+            assert!(
+                v >= 0,
                 "fast orbit equation produced a negative count (slot {raw_idx}, node {i}): a bug"
             );
-            row[id] = raw[i][raw_idx].max(0) as u64;
+            row[id] = v as u64;
         }
     }
     let ids = (0..n).map(|i| snapshot.id(i)).collect();

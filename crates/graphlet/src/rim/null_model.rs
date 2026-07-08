@@ -1,6 +1,6 @@
 //! Null-model / random-graph generators for significance testing.
 //!
-//! All generators return [`UnGraph<(), ()>`] (petgraph undirected unit graph) and
+//! All generators return [`UnGraph`](petgraph::graph::UnGraph)`<(), ()>` (petgraph undirected unit graph) and
 //! accept `rng: &mut impl Rng` so the caller controls reproducibility via a seeded
 //! RNG. Runtime dependencies: `petgraph` and `rand` only.
 

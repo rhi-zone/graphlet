@@ -1,7 +1,8 @@
 //! Directed motif analysis: the directed triad census (k=3, all 16 standard types)
 //! and the directed graphlet census / per-node orbits (weakly-connected, k in `2..=5`).
 //!
-//! The undirected census substrate ([`crate::census`], [`crate::orbit`]) analyzes every
+//! The undirected census substrate (the crate's internal `census` and `orbit` modules)
+//! analyzes every
 //! graph — directed or not — on its *underlying undirected structure* (in/out
 //! neighborhoods unioned). This module instead respects arc direction throughout:
 //! canonical labelling packs an ordered-pair (`k(k-1)`-bit) arc mask instead of an
@@ -10,17 +11,17 @@
 //! undirected class (say, `a -> b -> c` and `a -> b <- c`, both a path undirected) are
 //! *distinct* directed classes.
 //!
-//! - [`triad::triad_census`] — the standard 16-type directed triad census (Holland &
+//! - [`triad_census`](crate::rim::directed::triad::triad_census) — the standard 16-type directed triad census (Holland &
 //!   Leinhardt), over **every** 3-subset (connected or not). This is the well-known
 //!   checkpoint: totals sum to `C(n, 3)`, and the 16-way partition is exhaustively
 //!   verified (all `2^6` possible directed triads fall into exactly 16 isomorphism
 //!   classes).
-//! - [`census::count_directed`] / [`census::enumerate_directed`] — the directed
+//! - [`count_directed`](crate::rim::directed::count_directed) / [`enumerate_directed`](crate::rim::directed::enumerate_directed) — the directed
 //!   graphlet census proper, restricted to **weakly-connected** subsets (the graphlet
-//!   convention), at orders `2..=5` ([`census::MAX_K`]).
-//! - [`orbit::directed_graphlet_degree_vectors`] — per-node directed graphlet-degree
+//!   convention), at orders `2..=5` ([`MAX_K`](crate::rim::directed::MAX_K)).
+//! - [`directed_graphlet_degree_vectors`](crate::rim::directed::directed_graphlet_degree_vectors) — per-node directed graphlet-degree
 //!   vectors over the same `2..=5` order range, via a directed-automorphism
-//!   [`orbit::DirectedRegistry`].
+//!   [`DirectedRegistry`](crate::rim::directed::DirectedRegistry).
 //!
 //! **Performance caveat (k = 5).** The `k <= 4` substrate is cheap; `k = 5` is exact but
 //! slow, on two axes:
@@ -28,7 +29,7 @@
 //!   ordered-pair mask (`crates/graphlet/src/rim/directed/canonical.rs`), instead of
 //!   `4! = 24` — an ESU pass at `k = 5` over a graph with many weakly-connected 5-subsets
 //!   costs noticeably more per instance than at `k = 4`.
-//! - Building a [`orbit::DirectedRegistry`] at `k = 5` sweeps all `2^20` labelled
+//! - Building a [`DirectedRegistry`](crate::rim::directed::DirectedRegistry) at `k = 5` sweeps all `2^20` labelled
 //!   digraphs once (internally, to enumerate the 9364 weakly-connected classes — OEIS
 //!   A003085). That sweep is seconds, not microseconds — fine to pay once per registry
 //!   build, not something to do in a hot loop.

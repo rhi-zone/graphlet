@@ -2697,6 +2697,90 @@ fn sig_near_zero_for_null_graph() {
 }
 
 // ---------------------------------------------------------------------------
+// [S8] REGRESSION: a host with a locally-dense motif absent from every finite
+// null-ensemble member yields a ±∞ z-score for that class; normalized must not
+// leak NaN — it must be `None` (no defined-but-wrong unit-length vector), while
+// ordinary finite-z-score graphs still normalize to unit length as before.
+// ---------------------------------------------------------------------------
+#[test]
+fn sig_census_profile_normalize_no_nan_on_infinite_zscore() {
+    // K5 on nodes 0..=4, plus a sparse chain 4-5-6-7-8-9 hanging off it: 10 nodes
+    // total, one node (4) bridging the dense clique into the sparse tail. The
+    // configuration-model null matches only the degree *sequence*, so it will
+    // essentially never reassemble a 5-clique from this degree sequence — the
+    // k=5 census class for K5 has null_std == 0 while observed == 1, producing
+    // z = +inf for that class.
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for i in 0usize..5 {
+        for j in (i + 1)..5 {
+            edges.push((i, j));
+        }
+    }
+    edges.extend([(4, 5), (5, 6), (6, 7), (7, 8), (8, 9)]);
+    let g: UnGraph<(), ()> = build_un(&edges, 10);
+
+    let mut rng = StdRng::seed_from_u64(2024);
+    let profile =
+        census_significance_profile(&g, 5, 20, NullModel::ConfigurationModel, &mut rng, true);
+
+    // Confirm the repro premise: at least one class has a non-finite z-score.
+    assert!(
+        profile.z_scores.iter().any(|z| !z.is_finite()),
+        "repro premise failed: expected at least one non-finite z-score at k=5"
+    );
+
+    // The hard requirement: no NaN ever leaks into the returned profile, in
+    // either the raw z-scores or the normalized vector.
+    for &z in &profile.z_scores {
+        assert!(!z.is_nan(), "z_scores must never contain NaN");
+    }
+    match &profile.normalized {
+        None => {} // documented: not finitely normalizable, so no vector at all
+        Some(nv) => {
+            for &v in nv {
+                assert!(!v.is_nan(), "normalized must never contain NaN");
+            }
+        }
+    }
+    // Chosen semantics: when normalization is not well-defined (any non-finite
+    // z-score), `normalized` is `None` rather than a defined-but-corrupted vector.
+    assert!(
+        profile.normalized.is_none(),
+        "normalized must be None when any z-score is non-finite"
+    );
+
+    // Ordinary finite case still normalizes correctly (regression guard against
+    // over-correcting to always-None): a plain random graph at k=3 with a
+    // degree-preserving null (well-mixed, all classes reachable) normalizes to
+    // unit length.
+    let g2: UnGraph<(), ()> = build_un(&random_edges(18, 0.35, 88), 18);
+    let mut rng2 = StdRng::seed_from_u64(55);
+    let profile2 = census_significance_profile(
+        &g2,
+        3,
+        60,
+        NullModel::DegreePreserving {
+            n_swaps_per_edge: 10,
+        },
+        &mut rng2,
+        true,
+    );
+    assert!(
+        profile2.z_scores.iter().all(|z| z.is_finite()),
+        "sanity: this finite-case graph should not hit the infinite-z-score edge case"
+    );
+    let nv2 = profile2
+        .normalized
+        .as_ref()
+        .expect("finite z-scores must still normalize");
+    let norm: f64 = nv2.iter().map(|&z| z * z).sum::<f64>().sqrt();
+    assert!(
+        (norm - 1.0).abs() < 1e-10 || norm == 0.0,
+        "ordinary finite case must still normalize to unit length, got norm={norm}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Proptest: p-values in [0,1], z-scores not NaN, observed in range of nulls.
 // ---------------------------------------------------------------------------
 
@@ -3358,14 +3442,15 @@ fn graphlet_features_matches_census_directly() {
         let sel = Selector::connected_k_subsets(k);
         let census = count(&g, &sel);
         let features = graphlet_features(&g, k);
+        assert_eq!(features.k, k, "graphlet_features must tag its own k");
         assert_eq!(
-            features, census,
+            features.census, census,
             "graphlet_features must equal census at k={k}"
         );
     }
     // Cross-check the k=3 total against the known hand-count (6) from lib.rs.
     let k3 = graphlet_features(&g, 3);
-    assert_eq!(k3.values().sum::<u64>(), 6);
+    assert_eq!(k3.census.values().sum::<u64>(), 6);
 }
 
 // ---------------------------------------------------------------------------
@@ -3381,16 +3466,16 @@ fn graphlet_kernel_hand_triangle_vs_path() {
     let fp = graphlet_features(&path, 3);
 
     // Hand check: exactly one instance of each single class.
-    assert_eq!(ft.values().sum::<u64>(), 1);
-    assert_eq!(fp.values().sum::<u64>(), 1);
+    assert_eq!(ft.census.values().sum::<u64>(), 1);
+    assert_eq!(fp.census.values().sum::<u64>(), 1);
     let tri_class = Pattern::triangle().class_id();
     let path_class = Pattern::path(3).class_id();
     assert_ne!(
         tri_class, path_class,
         "triangle and P3 must be distinct classes"
     );
-    assert_eq!(ft.get(&tri_class).copied(), Some(1));
-    assert_eq!(fp.get(&path_class).copied(), Some(1));
+    assert_eq!(ft.census.get(&tri_class).copied(), Some(1));
+    assert_eq!(fp.census.get(&path_class).copied(), Some(1));
 
     // Disjoint classes -> zero kernel value both raw and cosine.
     assert_eq!(graphlet_kernel(&ft, &fp), 0);
@@ -3423,6 +3508,50 @@ fn graphlet_kernel_isomorphism_invariant() {
         );
         assert_eq!(graphlet_kernel(&fg, &fg), graphlet_kernel(&fg, &fgp));
     }
+}
+
+// ---------------------------------------------------------------------------
+// [K3.5] REGRESSION: cross-k comparison must not silently corrupt the result.
+//
+// `ClassId` is a bare adjacency bitmask with no order tag: a triangle at k=3
+// and a 5-star (K_{1,4}) at k=4 both encode mask `0b0111` = `ClassId(7)` (the
+// triangle's adjacency among its own 3 nodes, and the star center's adjacency
+// to all 4 leaves, happen to both set exactly the low 3 bits when read off
+// their respective canonical forms — the point is *some* k=3 and k=4 classes
+// collide on `ClassId`, so comparing censuses across k is a silent-corruption
+// hazard, not a hypothetical). Before the fix, `graphlet_kernel` compared the
+// raw `Census` maps directly and returned a bogus (but plausible-looking)
+// nonzero number. After the fix, `graphlet_features` tags its output with `k`
+// and `graphlet_kernel` panics on a mismatch instead.
+// ---------------------------------------------------------------------------
+#[test]
+fn graphlet_kernel_cross_k_comparison_is_caught() {
+    let triangle: UnGraph<(), ()> = build_un(&[(0, 1), (1, 2), (2, 0)], 3);
+    let star5: UnGraph<(), ()> = build_un(&[(0, 1), (0, 2), (0, 3), (0, 4)], 5);
+
+    let f_tri_k3 = graphlet_features(&triangle, 3);
+    let f_star_k4 = graphlet_features(&star5, 4);
+
+    // Guard against the test itself being vacuous: confirm each graph really
+    // does have a nonempty, single-class census at its own order first (the
+    // triangle has exactly one connected 3-subset; the star has 4 connected
+    // 4-subsets — one per excluded leaf — all of the same 3-star class).
+    assert_eq!(f_tri_k3.census.values().sum::<u64>(), 1);
+    assert_eq!(f_star_k4.census.len(), 1, "star5 at k=4 has a single class");
+    assert_eq!(f_star_k4.census.values().sum::<u64>(), 4);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        graphlet_kernel(&f_tri_k3, &f_star_k4)
+    }));
+    assert!(
+        result.is_err(),
+        "graphlet_kernel must reject/catch a cross-k comparison rather than silently \
+         returning a bogus value"
+    );
+
+    // Same-k comparisons are unaffected: no panic, ordinary kernel semantics.
+    let f_tri_k3_again = graphlet_features(&triangle, 3);
+    assert_eq!(graphlet_kernel(&f_tri_k3, &f_tri_k3_again), 1);
 }
 
 // ---------------------------------------------------------------------------

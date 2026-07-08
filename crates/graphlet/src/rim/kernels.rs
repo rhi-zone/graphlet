@@ -32,6 +32,13 @@
 //!
 //! // A graph is maximally self-similar under the cosine-normalized kernel.
 //! assert!((graphlet_kernel_cosine(&ft, &ft) - 1.0).abs() < 1e-12);
+//!
+//! // Comparing features built at different orders `k` is a programmer error —
+//! // `graphlet_kernel` panics rather than silently returning a bogus number
+//! // (a triangle at k=3 and a 5-star at k=4 share the same bare `ClassId` mask).
+//! let fp_k2 = graphlet_features(&path, 2);
+//! let result = std::panic::catch_unwind(|| graphlet_kernel(&ft, &fp_k2));
+//! assert!(result.is_err());
 //! ```
 
 use std::collections::{HashMap, VecDeque};
@@ -56,37 +63,74 @@ fn inner_product<K: Eq + std::hash::Hash>(a: &HashMap<K, u64>, b: &HashMap<K, u6
 // Graphlet kernel
 // ---------------------------------------------------------------------------
 
-/// The graphlet-class count vector of `g` at order `k`, read directly off the
-/// crate's census substrate — the feature representation for [`graphlet_kernel`].
+/// The graphlet-class count vector of `g` at order `k`, tagged with the order `k`
+/// it was built at.
 ///
-/// This is exactly `count(g, &Selector::connected_k_subsets(k))`: the kernel does
-/// not reimplement graphlet counting, it reuses the verified census fold.
+/// [`ClassId`](crate::canonical::ClassId) is a bare adjacency bitmask with no order
+/// tag of its own — a triangle at `k=3` and a 5-star at `k=4` encode the same mask
+/// — so a [`Census`] alone cannot detect a cross-order comparison. Carrying `k`
+/// alongside the census lets [`graphlet_kernel`] catch that case instead of
+/// silently returning a bogus inner product.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphletFeatures {
+    /// The order `k` these features were computed at.
+    pub k: usize,
+    /// The graphlet-class count vector itself, read directly off the crate's
+    /// census substrate.
+    pub census: Census,
+}
+
+/// Compute [`GraphletFeatures`] for `g` at order `k` — the feature representation
+/// for [`graphlet_kernel`].
+///
+/// The `census` field is exactly `count(g, &Selector::connected_k_subsets(k))`:
+/// this does not reimplement graphlet counting, it reuses the verified census
+/// fold, tagged with `k` for [`graphlet_kernel`]'s cross-order guard.
 ///
 /// # Panics
 ///
 /// Panics unless `2 <= k <= MAX_K` (see [`Selector::connected_k_subsets`]).
 #[must_use]
-pub fn graphlet_features<G: GraphAdapter>(g: G, k: usize) -> Census {
-    count(g, &Selector::connected_k_subsets(k))
+pub fn graphlet_features<G: GraphAdapter>(g: G, k: usize) -> GraphletFeatures {
+    GraphletFeatures {
+        k,
+        census: count(g, &Selector::connected_k_subsets(k)),
+    }
 }
 
 /// Graphlet kernel: the inner product of two graphlet-class count vectors, aligned
 /// by class id.
 ///
-/// `a` and `b` should be [`graphlet_features`] outputs at the *same* order `k` —
-/// counts at mismatched orders are not comparable and the result is meaningless
-/// (not detected here, since [`Census`] does not carry its `k`).
+/// `a` and `b` must be [`graphlet_features`] outputs at the *same* order `k` —
+/// counts at mismatched orders are not comparable (the same [`ClassId`](crate::canonical::ClassId)
+/// mask can denote different classes at different orders), and this function
+/// panics rather than silently returning a meaningless value.
+///
+/// # Panics
+///
+/// Panics if `a.k != b.k`.
 #[must_use]
-pub fn graphlet_kernel(a: &Census, b: &Census) -> u64 {
-    inner_product(a, b)
+pub fn graphlet_kernel(a: &GraphletFeatures, b: &GraphletFeatures) -> u64 {
+    assert_eq!(
+        a.k, b.k,
+        "graphlet_kernel: mismatched orders (k={} vs k={}) — features must come from \
+         graphlet_features calls at the same k, since ClassId does not carry an order \
+         tag and a cross-k comparison would silently produce a bogus value",
+        a.k, b.k
+    );
+    inner_product(&a.census, &b.census)
 }
 
 /// Cosine-normalized graphlet kernel: `k(G,H) / sqrt(k(G,G) * k(H,H))`, in `[0, 1]`.
 ///
 /// Returns `0.0` if either graph's self-kernel is `0` (i.e. it has no connected
 /// k-subgraphs at all, so its feature vector is the zero vector).
+///
+/// # Panics
+///
+/// Panics if `a.k != b.k` (see [`graphlet_kernel`]).
 #[must_use]
-pub fn graphlet_kernel_cosine(a: &Census, b: &Census) -> f64 {
+pub fn graphlet_kernel_cosine(a: &GraphletFeatures, b: &GraphletFeatures) -> f64 {
     let kab = graphlet_kernel(a, b) as f64;
     let kaa = graphlet_kernel(a, a) as f64;
     let kbb = graphlet_kernel(b, b) as f64;
@@ -303,8 +347,8 @@ pub enum GramNormalization {
 /// Compute the full `n x n` Gram (kernel) matrix over `items`, given any symmetric
 /// kernel function `kernel`.
 ///
-/// Generic over the feature representation `T` (a [`Census`], a WL iteration
-/// history `Vec<Labeling>`, a shortest-path histogram, or anything else); only
+/// Generic over the feature representation `T` (a [`GraphletFeatures`], a WL
+/// iteration history `Vec<Labeling>`, a shortest-path histogram, or anything else); only
 /// `n(n+1)/2` kernel evaluations are performed (the matrix is symmetric by
 /// construction, mirrored rather than recomputed).
 ///
@@ -366,7 +410,7 @@ pub fn graphlet_gram_matrix<G: GraphAdapter>(
     k: usize,
     normalization: GramNormalization,
 ) -> Vec<Vec<f64>> {
-    let feats: Vec<Census> = graphs.iter().map(|&g| graphlet_features(g, k)).collect();
+    let feats: Vec<GraphletFeatures> = graphs.iter().map(|&g| graphlet_features(g, k)).collect();
     gram_matrix(&feats, |a, b| graphlet_kernel(a, b) as f64, normalization)
 }
 
