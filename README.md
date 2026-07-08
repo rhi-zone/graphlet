@@ -244,16 +244,6 @@ assert_eq!(graphlet_kernel_cosine(&ft, &fp), 0.0);
   VF2 isomorphism search this crate builds on) or `rustworkx-core` for a
   broader algorithm suite.
 
-## Install
-
-`graphlet` is not published to crates.io, so depend on it by git:
-
-```toml
-[dependencies]
-graphlet = { git = "https://github.com/rhi-zone/graphlet" }
-petgraph = "0.8"
-```
-
 ## License
 
 MIT. See the `LICENSE` file.
