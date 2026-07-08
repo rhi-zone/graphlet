@@ -68,8 +68,15 @@ through connected 4-node cores plus attachment tallies. It is verified exact,
 node-for-node and count-for-count, against the exact census path across a
 battery of standard graphs (paths, cycles, stars, complete graphs, wheels,
 trees, complete bipartite graphs, the Petersen graph, the cube graph Q3) plus
-fuzzed random graphs, and runs roughly two orders of magnitude faster on
-larger or denser graphs.
+fuzzed random graphs. Because the exact path pays a `k!` canonicalization per
+5-subset while the fast path never labels one, the gap widens with graph size
+and density rather than sitting at a fixed multiplier: on seeded G(n, p) random
+graphs it grows from roughly 10x at n=40 to over 100x by n=150, and past there
+the exact path leaves the seconds regime entirely while the fast path stays in
+the millisecond-to-few-second range (at n=200, p=0.1 and n=100+, p=0.3 the exact
+census is already impractical to time, yet the fast path finishes in a few
+seconds). The shipped `examples/scalable_bench.rs` reproduces the whole sweep;
+run it with `cargo run --release -p graphlet --example scalable_bench`.
 
 ### Named motifs
 
