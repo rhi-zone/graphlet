@@ -28,6 +28,7 @@ use crate::rim::null_model::{
     configuration_model, configuration_model_simple, double_edge_swap, lfr_benchmark,
     watts_strogatz,
 };
+use crate::rim::scalable::{fast_count, fast_graphlet_degree_vectors, FAST_ORBIT_COUNT};
 use crate::snapshot::Snapshot;
 use crate::template::{
     count_induced_matches, count_monomorphisms, count_monomorphisms_unlabelled, monomorphisms,
@@ -3780,5 +3781,123 @@ proptest! {
 
         let sp_raw = shortest_path_gram_matrix(&refs, GramNormalization::Raw);
         prop_assert!(is_psd_via_cholesky(&sp_raw, 1e-5), "SP Gram not PSD, seed={seed}");
+    }
+}
+
+// ===========================================================================
+// SCALABLE COUNTING (phase 6): fast ORCA-style orbit counting for k <= 4 (orbits
+// 0..=14) must equal the exact census/GDV node-for-node and count-for-count. This is
+// the crux — the oracle is the crate's own exact `graphlet_degree_vectors` / `count`.
+// ===========================================================================
+
+/// Assert the fast path equals the exact path, node-for-node (GDV, orbits 0..=14) and
+/// count-for-count (census, k = 2..=4), on one host graph.
+fn assert_fast_equals_exact(edges: &[(usize, usize)], n: usize, label: &str) {
+    let g = build_un(edges, n);
+    let reg = Registry::build();
+
+    let exact_gdv = graphlet_degree_vectors(&g, &reg);
+    let fast_gdv = fast_graphlet_degree_vectors(&g, &reg);
+    assert_eq!(fast_gdv.orbit_count(), FAST_ORBIT_COUNT);
+    assert_eq!(
+        exact_gdv.len(),
+        fast_gdv.len(),
+        "{label}: node count mismatch"
+    );
+    for i in 0..exact_gdv.len() {
+        let exact_prefix = &exact_gdv.row(i)[0..FAST_ORBIT_COUNT];
+        assert_eq!(
+            exact_prefix,
+            fast_gdv.row(i),
+            "{label}: GDV mismatch at node {i} (host id {:?})",
+            exact_gdv.id(i)
+        );
+    }
+
+    for k in 2..=4 {
+        let sel = Selector::connected_k_subsets(k);
+        let exact_census = count(&g, &sel);
+        let fast_census = fast_count(&g, &reg, &sel);
+        assert_eq!(exact_census, fast_census, "{label}: k={k} census mismatch");
+    }
+}
+
+#[test]
+fn fast_orbit_counts_exact_on_structured_and_fuzzed_battery() {
+    for (edges, n) in undirected_host_battery() {
+        let label = format!("n={n} edges={}", edges.len());
+        assert_fast_equals_exact(&edges, n, &label);
+    }
+    // A denser fuzz sweep across more sizes/densities than the shared battery, since
+    // this is the crux property of the whole phase.
+    for seed in 0..40u64 {
+        let n = 4 + (seed as usize % 20);
+        let p = 0.05 + 0.9 * ((seed % 10) as f64 / 10.0);
+        let edges = random_edges(n, p, 1000 + seed);
+        assert_fast_equals_exact(&edges, n, &format!("fuzz n={n} p={p:.2} seed={seed}"));
+    }
+}
+
+#[test]
+fn fast_orbit_counts_exact_on_trees_and_bipartite() {
+    // A handful of trees (star, caterpillar, binary) and complete bipartite graphs —
+    // structurally distinct from the dense/random battery above.
+    let star = star_edges(9);
+    assert_fast_equals_exact(&star, 9, "star9");
+
+    let caterpillar: Vec<(usize, usize)> = (0..7)
+        .map(|i| (i, i + 1))
+        .chain(
+            (0..8)
+                .step_by(2)
+                .filter(|&i| i + 8 < 16)
+                .map(|i| (i, i + 8)),
+        )
+        .collect();
+    assert_fast_equals_exact(&caterpillar, 16, "caterpillar");
+
+    // Complete binary tree, depth 3 (15 nodes).
+    let mut binary = Vec::new();
+    for i in 0..7usize {
+        binary.push((i, 2 * i + 1));
+        binary.push((i, 2 * i + 2));
+    }
+    assert_fast_equals_exact(&binary, 15, "binary-tree-depth3");
+
+    // Complete bipartite K_{3,4}.
+    let k34: Vec<(usize, usize)> = (0..3).flat_map(|a| (3..7).map(move |b| (a, b))).collect();
+    assert_fast_equals_exact(&k34, 7, "K_3_4");
+
+    // Complete bipartite K_{4,4}.
+    let k44: Vec<(usize, usize)> = (0..4).flat_map(|a| (4..8).map(move |b| (a, b))).collect();
+    assert_fast_equals_exact(&k44, 8, "K_4_4");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// The exactness property, as a proptest over the shared `graph_strategy`
+    /// (0..=7 nodes, arbitrary edge-presence bits): the fast path must equal the
+    /// exact path on every generated graph, not just the fixed battery above.
+    #[test]
+    fn prop_fast_orbit_counts_equal_exact((n, bits, _seed) in graph_strategy()) {
+        let edges = edges_from_bits(n, &bits);
+        let g = build_un(&edges, n);
+        let reg = Registry::build();
+
+        let exact_gdv = graphlet_degree_vectors(&g, &reg);
+        let fast_gdv = fast_graphlet_degree_vectors(&g, &reg);
+        prop_assert_eq!(exact_gdv.len(), fast_gdv.len());
+        for i in 0..exact_gdv.len() {
+            prop_assert_eq!(
+                &exact_gdv.row(i)[0..FAST_ORBIT_COUNT],
+                fast_gdv.row(i),
+                "GDV mismatch at node {}", i
+            );
+        }
+        for k in 2..=4 {
+            let sel = Selector::connected_k_subsets(k);
+            prop_assert_eq!(count(&g, &sel), fast_count(&g, &reg, &sel));
+        }
     }
 }

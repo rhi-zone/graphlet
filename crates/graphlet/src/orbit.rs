@@ -133,6 +133,21 @@ pub struct GdvTable<N> {
     rows: Vec<Vec<u64>>,
 }
 
+impl<N> GdvTable<N> {
+    /// Build a table from its raw parts.
+    ///
+    /// Crate-internal: lets [`crate::rim::scalable`]'s fast path produce the same
+    /// public row/column shape as [`graphlet_degree_vectors`] without duplicating the
+    /// struct. `rows[i]` must have length `orbit_count` for every `i`.
+    pub(crate) fn from_parts(orbit_count: usize, ids: Vec<N>, rows: Vec<Vec<u64>>) -> Self {
+        GdvTable {
+            orbit_count,
+            ids,
+            rows,
+        }
+    }
+}
+
 impl<N: Copy> GdvTable<N> {
     /// Number of nodes (rows).
     #[inline]
