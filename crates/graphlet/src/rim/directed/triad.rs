@@ -3,7 +3,7 @@
 //! naming popularized by Davis & Leinhardt and implemented identically in `sna`
 //! (R) and `igraph`'s `triad_census`).
 //!
-//! Unlike [`crate::rim::directed::census`] (which restricts to *weakly-connected*
+//! Unlike the crate's directed graphlet census (which restricts to *weakly-connected*
 //! subsets, the graphlet convention), the triad census counts **every** 3-subset,
 //! connected or not — 3 of the 16 types (003, 012, 102) are disconnected. This is the
 //! standard social-network-analysis quantity: e.g. `sum(census) == C(n, 3)`.
@@ -226,7 +226,7 @@ fn center_subtype_120(
 }
 
 /// A class -> count map over the 16 standard triad types (dense array, indexed by
-/// [`TriadType::index`]).
+/// each [`TriadType`]'s internal ordering).
 #[derive(Clone, Debug)]
 pub struct TriadCensus {
     counts: [u64; 16],

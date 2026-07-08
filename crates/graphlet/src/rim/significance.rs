@@ -1,22 +1,22 @@
 //! Motif significance: z-scores and empirical p-values against a null model.
 //!
 //! Given a host graph, a set of motif targets (or the full graphlet census at
-//! order `k`), and a null-model ensemble, [`motif_significance`] and
-//! [`census_significance_profile`] compute for each target:
+//! order `k`), and a null-model ensemble, [`motif_significance`](crate::rim::significance::motif_significance) and
+//! [`census_significance_profile`](crate::rim::significance::census_significance_profile) compute for each target:
 //!
 //! - **observed**: the count in the host graph.
 //! - **null\_mean** / **null\_std**: mean and population standard deviation of
 //!   the count over the ensemble.
 //! - **z\_score**: `(observed − null_mean) / null_std` (guarded when
-//!   `null_std == 0`; see [`compute_significance_stats`]).
+//!   `null_std == 0`; see [`compute_significance_stats`](crate::rim::significance::compute_significance_stats)).
 //! - **p\_value\_over**: fraction of ensemble samples with count **≥ observed**
 //!   (one-sided over-representation; ties are included, following the convention
 //!   in Milo *et al.* 2002).
 //!
 //! # Null models
 //!
-//! Both [`NullModel::DegreePreserving`] (double-edge swap) and
-//! [`NullModel::ConfigurationModel`] are supported. The former exactly preserves
+//! Both [`NullModel::DegreePreserving`](crate::rim::significance::NullModel::DegreePreserving) (double-edge swap) and
+//! [`NullModel::ConfigurationModel`](crate::rim::significance::NullModel::ConfigurationModel) are supported. The former exactly preserves
 //! every node's degree; the latter matches only the degree sequence in
 //! distribution.
 //!
@@ -121,9 +121,22 @@ pub struct SignificanceProfile {
     pub entries: Vec<(ClassId, SignificanceEntry)>,
     /// Z-score vector in the same order as `entries`.
     pub z_scores: Vec<f64>,
-    /// Unit-length-normalized z-score vector, present when `normalize = true`
-    /// was passed. If the z-score vector is the zero vector (all z-scores
-    /// exactly 0.0), the normalized vector is also zero (not NaN).
+    /// Unit-length-normalized z-score vector, present only when `normalize =
+    /// true` was passed **and** every z-score in the profile is finite.
+    ///
+    /// If the z-score vector is the zero vector (all z-scores exactly `0.0`),
+    /// the normalized vector is also zero (not `NaN`). If **any** class has a
+    /// non-finite z-score (`±∞`, which happens legitimately when
+    /// `null_std == 0` but `observed != null_mean` — e.g. a locally-dense
+    /// motif absent from every member of a finite null ensemble), unit-length
+    /// normalization (`z / sqrt(Σ z²)`) is not well-defined (it would produce
+    /// `∞/∞ = NaN` for the infinite class and `finite/∞ = 0.0` for every other
+    /// class, silently corrupting the profile for cosine comparison), so this
+    /// is `None` instead. **`normalized` is `Some` only when every entry of
+    /// it is finite — a `NaN` never leaks into a returned profile.** Callers
+    /// that need a profile in this situation should compare `z_scores`
+    /// directly (which do carry the `±∞` information) rather than
+    /// `normalized`.
     pub normalized: Option<Vec<f64>>,
 }
 
@@ -303,9 +316,9 @@ where
 /// classes at order `k`, one entry per class. Classes are ordered by their
 /// canonical mask (ascending).
 ///
-/// For `k ≤ 5` the full ground-truth class set from
-/// [`crate::canonical::all_connected_classes`] is used (so unobserved classes
-/// get an observed count of 0). For `k > 5` the class set is the union of all
+/// For `k ≤ 5` the full ground-truth class set from the crate's internal
+/// canonical-class enumeration is used (so unobserved classes get an observed
+/// count of 0). For `k > 5` the class set is the union of all
 /// classes seen in the observed graph and the ensemble.
 ///
 /// # Normalization
@@ -314,7 +327,10 @@ where
 /// the unit-length-normalized z-score vector (Euclidean norm = 1), the standard
 /// SP normalization (Milo *et al.* 2004). If the z-score vector is all-zero (e.g.
 /// because the graph has no subgraphs at this order), the normalized vector is
-/// also all-zero (not `NaN`).
+/// also all-zero (not `NaN`). If any class's z-score is non-finite (`±∞`, from a
+/// `null_std == 0` class — see [`compute_significance_stats`]), unit-length
+/// normalization is not well-defined and `normalized` is `None` instead of
+/// leaking `NaN` — see [`SignificanceProfile::normalized`].
 ///
 /// # Panics
 ///
@@ -377,17 +393,23 @@ where
     let z_scores: Vec<f64> = entries.iter().map(|(_, e)| e.z_score).collect();
 
     let normalized = if normalize {
-        // Euclidean norm (±∞ entries contribute ∞ to the sum, which is correct
-        // — the normalization will also be ∞, and ∞/∞ = NaN is avoided because
-        // the caller's z-scores should be finite for well-behaved graphs; for
-        // graphs that yield ∞ z-scores the normalized vector can contain NaN,
-        // which the profile doc acknowledges as an edge case).
-        let norm_sq: f64 = z_scores.iter().map(|&z| z * z).sum();
-        let norm = norm_sq.sqrt();
-        if norm == 0.0 {
-            Some(z_scores.clone())
+        if z_scores.iter().any(|z| !z.is_finite()) {
+            // A ±∞ z-score (null_std == 0 with observed != null_mean, e.g. a
+            // locally-dense motif absent from every null-ensemble member) makes
+            // unit-length normalization undefined: the Euclidean norm itself
+            // would be ∞, giving ∞/∞ = NaN for the infinite class and
+            // finite/∞ = 0.0 for every other class — silently corrupting the
+            // profile for cosine comparison. Emit no normalized vector at all
+            // rather than let a NaN leak out; see `SignificanceProfile::normalized`.
+            None
         } else {
-            Some(z_scores.iter().map(|&z| z / norm).collect())
+            let norm_sq: f64 = z_scores.iter().map(|&z| z * z).sum();
+            let norm = norm_sq.sqrt();
+            if norm == 0.0 {
+                Some(z_scores.clone())
+            } else {
+                Some(z_scores.iter().map(|&z| z / norm).collect())
+            }
         }
     } else {
         None
