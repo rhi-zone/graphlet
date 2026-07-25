@@ -8,11 +8,12 @@ export default withMermaid(
       'Graphlet analysis for petgraph: subgraph census, GDV/GDD, and network-motif detection',
 
     base: '/graphlet/',
+    srcExclude: ['**/CLAUDE.md'],
 
     themeConfig: {
       nav: [
         { text: 'Guide', link: '/introduction' },
-        { text: 'rhi', link: 'https://rhi.zone/' },
+        { text: 'rhi', link: 'https://docs.rhi.zone/' },
       ],
 
       sidebar: [
